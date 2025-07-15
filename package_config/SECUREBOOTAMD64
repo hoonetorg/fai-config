@@ -1,0 +1,3 @@
+PACKAGES install GRUB_EFI
+shim-signed
+grub-efi-amd64-signed
