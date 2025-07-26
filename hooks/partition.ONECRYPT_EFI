@@ -11,6 +11,17 @@ from typing import Any
 import json
 import time
 
+
+def subprocess_run_wrapper(command: str, dryrun: bool = False, **kwargs) -> subprocess.CompletedProcess | None:
+    cmd_list = shlex.split(command)
+
+    if dryrun:
+        logging.info(f"[DRYRUN] {command}")
+        return None
+
+    logging.info(f"[EXECUTING] {command}")
+    return subprocess.run(cmd_list, **kwargs)
+
 def write_ks_snippets(diskpath: str):
     # Persist the disk identifier without newline
     with open('/tmp/disk-id', 'w') as f:
@@ -36,20 +47,29 @@ def write_ks_snippets(diskpath: str):
     # Debug output for partitions.ks
     logging.info(f"Generated /tmp/partitions.ks:\n{partitions_ks}")
 
-def get_disk_info(diskpath: str) -> Any:
+def get_disk_info(diskpath: str, dryrun: bool = False) -> Any:
     # Gather disk info via lsblk
-    lsblk_cmd = [
-        "lsblk", "--bytes", "-Jo",
-        ("DISK-SEQ,NAME,KNAME,PKNAME,PATH,ID-LINK,SCHED,SIZE,START,PTTYPE,"
+    lsblk_cmd = (
+         "lsblk --bytes -Jo "
+         "DISK-SEQ,NAME,KNAME,PKNAME,PATH,ID-LINK,SCHED,SIZE,START,PTTYPE,"
          "TYPE,PARTN,PARTTYPE,PARTTYPENAME,PARTFLAGS,PARTLABEL,FSTYPE,"
-         "FSROOTS,MOUNTPOINTS"),
-        diskpath
-    ]
-    logging.info(f"Running lsblk: {' '.join(lsblk_cmd)}")
+         "FSROOTS,MOUNTPOINTS "
+         f"{shlex.quote(diskpath)}" 
+    )
     try:
-        raw = subprocess.check_output(lsblk_cmd,
-                                      stderr=subprocess.PIPE,
-                                      text=True)
+        result = subprocess_run_wrapper(
+            command=lsblk_cmd,
+            dryrun=dryrun,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+
+        if dryrun or result is None:
+            return None
+
+        raw = result.stdout
         logging.info(f"Raw lsblk output:\n{raw}")
     except subprocess.CalledProcessError as err:
         logging.error(f"lsblk failed: {err.stderr}")
@@ -290,6 +310,7 @@ def do_setup_storage(diskpath: str):
 
 
 def main():
+    dryrun = False
     logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
     ks = os.path.isdir("/usr/share/anaconda")
@@ -303,7 +324,7 @@ def main():
     root_end_mib = 2048 + 2048 + rootsizemib # efi size + boot size + rootsizemib
     wipe_parts = [ 1, 2, 3 ]
 
-    disk_info = get_disk_info(diskpath=diskpath)
+    disk_info = get_disk_info(diskpath=diskpath, dryrun=dryrun)
 
     if not disk_info:
         logging.error(f"Couldn't get diskinfo {diskpath}")
