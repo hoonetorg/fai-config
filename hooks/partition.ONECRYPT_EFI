@@ -13,14 +13,17 @@ import time
 
 
 def subprocess_run_wrapper(command: str, dryrun: bool = False, **kwargs) -> subprocess.CompletedProcess | None:
-    cmd_list = shlex.split(command)
+    if kwargs.get("shell"):
+        cmd = command
+    else:
+        cmd = shlex.split(command)
 
     if dryrun:
         logging.info(f"[DRYRUN] {command}")
         return None
 
     logging.info(f"[EXECUTING] {command}")
-    return subprocess.run(cmd_list, **kwargs)
+    return subprocess.run(cmd, **kwargs)
 
 def write_ks_snippets(diskpath: str):
     # Persist the disk identifier without newline
@@ -137,14 +140,14 @@ def check_should_partition(diskpath: str, disk_info: dict ) -> bool:
 
     return should_partition
 
-def do_device_settle():
+def do_device_settle(dryrun: bool = False):
     # Wait for udev to settle
     for ucmd in ['trigger', 'settle']:
-        subprocess.check_call(["udevadm", ucmd])
+        subprocess_run_wrapper(command=f"udevadm {shlex.quote(ucmd)}", dryrun=dryrun)
         time.sleep(5)
     
     
-def do_wipe_parts(diskpath: str, disk_info: dict, wipe_parts: list ) -> bool:
+def do_wipe_parts(diskpath: str, disk_info: dict, wipe_parts: list, dryrun: bool = False) -> bool:
     disk_id_link = disk_info.get('id-link')
     disk_parts = disk_info.get("children")
     disk_pttype = disk_info.get("pttype")
@@ -158,113 +161,140 @@ def do_wipe_parts(diskpath: str, disk_info: dict, wipe_parts: list ) -> bool:
                 logging.info(f"{diskpath} has existing partition: {part_path}")
                 #if part_id_link in [f"{disk_id_link}-part{i}" for i in wipe_parts]:
                 if partnumber and (int(partnumber) in wipe_parts):
-                    wipe_cmd = ["wipefs","--force","--all", part_path]
-                    logging.info(f"Running wipe: {' '.join(wipe_cmd)}")
-                    subprocess.check_call(wipe_cmd)
+                    subprocess_run_wrapper(command=f"wipefs --force --all {shlex.quote(part_path)}", dryrun=dryrun)
             logging.info(f"signatures wiped on parts {wipe_parts} wiped.")
     
-        partprobe_cmd = ["partprobe", diskpath]
-        logging.info(f"Running partprobe: {' '.join(partprobe_cmd)}")
-        subprocess.check_call(partprobe_cmd)
-        do_device_settle()
+        subprocess_run_wrapper(command=f"partprobe {shlex.quote(diskpath)}", dryrun=dryrun)
+        do_device_settle(dryrun=dryrun)
 
-
-def do_partition(diskpath: str, root_end_mib: int):
+def do_partition(diskpath: str, root_end_mib: int, dryrun: bool = False):
     # Disk is valid and empty – now partition it
     logging.info(f"Partitioning {diskpath}")
-    parted_cmd = [
-        "parted", "--script", diskpath,
-        "unit", "MiB",
-        "mklabel", "gpt",
-        "mkpart", "primary", "1", "2048",
-        "mkpart", "primary", "2048", "4096",
-        "mkpart", "primary", "4096", str(root_end_mib),
-        "set", "1", "boot", "on",
-        "set", "1", "esp", "on",
-        "set", "2", "bls_boot", "on",
-        "name", "1", "'EFI System Partition'",
-        "name", "2", "''",
-        "name", "3", "''"
-    ]
-    logging.info(f"Running parted: {' '.join(parted_cmd)}")
-    subprocess.check_call(parted_cmd)
+    subprocess_run_wrapper(command=(
+        "parted --script "
+        f"{shlex.quote(diskpath)} "
+        "unit MiB "
+        "mklabel gpt "
+        "mkpart primary 1 2048 "
+        "mkpart primary 2048 4096 "
+        f"mkpart primary 4096 {shlex.quote(str(root_end_mib))} "
+        "set 1 boot on "
+        "set 1 esp on "
+        "set 2 bls_boot on "
+        f"name 1 {shlex.quote("'EFI System Partition'")} "
+        f"name 2 {shlex.quote("''")} "
+        f"name 3 {shlex.quote("''")}"
+        ),
+        dryrun=dryrun)
 
-    do_device_settle()
+    do_device_settle(dryrun=dryrun)
 
     # Show free space after partitioning
     logging.info(f"Current partition layout (free space):")
-    subprocess.check_call([
-        "parted", "--script", diskpath,
-        "unit", "MiB", "print", "free"
-    ])
+    subprocess_run_wrapper(command=(
+        "parted --script "
+        f"{shlex.quote(diskpath)} "
+        "unit MiB print free"
+        ),
+        dryrun=dryrun)
 
-def do_cryptsetup(partition: str, cryptpassword: str) -> str:
+def do_cryptsetup(partition: str, cryptpassword: str, dryrun: bool = False) -> str:
  
     password=(cryptpassword + "\n").encode()
-    subprocess.run([
-        "cryptsetup", "luksFormat", 
-        "--type", "luks2", 
-        "--batch-mode",
-        "-c", "aes-xts-plain64",
-        "-s", "512",
-        "-h", "sha512",
-        "-i", "5000",
-        "--use-random",
-        "--align-payload", "2048",
-        partition ], 
+    subprocess_run_wrapper(command=(
+        "cryptsetup luksFormat " 
+        "--type luks2 " 
+        "--batch-mode "
+        "-c aes-xts-plain64 "
+        "-s 512 "
+        "-h sha512 "
+        "-i 5000 "
+        "--use-random "
+        "--align-payload 2048 "
+        f"{shlex.quote(partition)}" 
+        ),
+        dryrun=dryrun,
         input=password,
         check=True
     )
 
-    do_device_settle()
+    do_device_settle(dryrun=dryrun)
 
-    uuid = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", partition], text=True).strip()
+    result = subprocess_run_wrapper(
+        command=f"blkid -s UUID -o value {shlex.quote(partition)}",
+        dryrun=dryrun,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True
+        )
 
-    subprocess.run([
-        "cryptsetup", "open", 
-        "--type", "luks2", 
-        "--batch-mode",
-        "--allow-discards",
-        partition, 
-        f"luks-{uuid}" ], 
+    if dryrun or result is None:
+        return None
+
+    uuid = result.stdout.strip()
+
+    subprocess_run_wrapper(command=(
+        "cryptsetup open " 
+        "--type luks2 " 
+        "--batch-mode "
+        "--allow-discards "
+        f"{shlex.quote(partition)} " 
+        f"luks-{shlex.quote(uuid)}"
+        ), 
+        dryrun=dryrun,
         input=password,
         check=True
     )
 
-    do_device_settle()
+    do_device_settle(dryrun=dryrun)
  
     logging.info(f"Created LUKS device on {partition} with UUID {uuid} and opened it as luks-{uuid}")
 
     return uuid
 
 
-def do_mkfs(part: str, parttype: str) -> str:
+def do_mkfs(part: str, parttype: str, dryrun: bool = False) -> str:
     match parttype:
         case 'EFI':
-            subprocess.check_call(["mkfs.vfat", "-F", '32', part])
+            subprocess_run_wrapper(command=f"mkfs.vfat -F 32 {shlex.quote(part)}", dryrun=dryrun)
         case 'btrfs':
-            subprocess.check_call(["mkfs.btrfs", "-d", 'single', '-m', 'dup', part])
+            subprocess_run_wrapper(command=f"mkfs.btrfs -d single -m dup {shlex.quote(part)}", dryrun=dryrun)
         case _:
             logging.error(f"Unsupported parttype {parttype} - exiting")
             sys.exit(1)
 
-    uuid = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", part], text=True).strip()
+    result = subprocess_run_wrapper(
+        command=f"blkid -s UUID -o value {shlex.quote(part)}",
+        dryrun=dryrun,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True
+        )
+
+    if dryrun or result is None:
+        return None
+
+    uuid = result.stdout.strip()
+
     logging.info(f"Formatted partition {part} as {parttype} with UUID {uuid}")
+
     return uuid
 
-def do_btrfs_subvols(part: str, subvolumes: list):
+def do_btrfs_subvols(part: str, subvolumes: list, dryrun: bool = False):
     mountpoint = "/btrfs"
     logging.info(f"Mounting {part} at {mountpoint}")
     os.makedirs(mountpoint, exist_ok=True)
-    subprocess.check_call(["mount", '-o', 'rw,subvolid=5,compress=zstd:1,discard=async', part, mountpoint])
+    subprocess_run_wrapper(command=f"mount -o rw,subvolid=5,compress=zstd:1,discard=async {shlex.quote(part)} {shlex.quote(mountpoint)}", dryrun=dryrun)
     try:
         for sub in subvolumes:
             path = os.path.join(mountpoint, sub)
             logging.info(f"Creating btrfs subvolume {path}")
-            subprocess.check_call(["btrfs", "subvolume", "create", path])
+            subprocess_run_wrapper(command=f"btrfs subvolume create {shlex.quote(path)}", dryrun=dryrun)
     finally:
         logging.info(f"Unmounting {mountpoint}")
-        subprocess.check_call(["umount", mountpoint])
+        subprocess_run_wrapper(command=f"umount {shlex.quote(mountpoint)}", dryrun=dryrun)
         os.rmdir(mountpoint)
 
 
@@ -344,7 +374,7 @@ def main():
         write_ks_snippets(diskpath=diskpath)
     elif fai:
         do_setup_storage(diskpath)
-        subprocess.run(f"skiptask partition", shell=True, executable="/bin/bash", check=True)
+        subprocess_run_wrapper(command=f"skiptask partition", dryrun=dryrun, shell=True, executable="/bin/bash", check=True)
 
 if __name__ == "__main__":
     main()
