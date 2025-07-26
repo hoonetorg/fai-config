@@ -34,7 +34,7 @@ def write_ks_snippets(diskpath: str):
         f.write(partitions_ks)
     
     # Debug output for partitions.ks
-    logging.info(f"Generated /tmp/partitions.ks:\n{partition_ks}")
+    logging.info(f"Generated /tmp/partitions.ks:\n{partitions_ks}")
 
 def get_disk_info(diskpath: str) -> Any:
     # Gather disk info via lsblk
