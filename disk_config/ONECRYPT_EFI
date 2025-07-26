@@ -1,0 +1,15 @@
+# example of new config file for setup-storage
+#
+# p=<partlabel> <mountpoint> <size>   <fs type> <mount options> <misc options>
+
+# efi version of ONECRYPT, ensuring that even if hook doesn't do skiptask partition 
+# no disk with important data is erased and partitioning fails
+
+disk_config /dev/disk/by-id/scsi-definitelyNotExistingDisk disklabel:gpt bootable:1 fstabkey:uuid align-at:1M
+
+p=efi /boot/efi  2G       vfat   rw
+p=boot /boot      2G       ext4  rw,discard
+p=system -          40G      -      -
+
+disk_config cryptsetup
+luks:"hoonetorg" /      /dev/disk/by-id/scsi-definitelyNotExistingDisk-part3 ext4 rw,discard

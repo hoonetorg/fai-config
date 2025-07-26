@@ -1,0 +1,327 @@
+#!/usr/bin/env -S python3 -u
+
+import json
+import os
+import subprocess
+import sys
+import time
+from typing import Any
+
+def write_ks_snippets(diskpath: str):
+    # Persist the disk identifier without newline
+    with open('/tmp/disk-id', 'w') as f:
+        f.write(diskpath)
+    
+    # Generate partitions.ks Kickstart fragment
+    partitions_ks = f"""
+    ignoredisk --only-use={diskpath}
+    part /boot/efi --fstype="efi" --onpart={diskpath}-part1 --fsoptions="umask=0077,shortname=winnt"
+    part btrfs.2 --fstype="btrfs" --onpart={diskpath}-part2
+    part btrfs.3 --fstype="btrfs" --onpart={diskpath}-part3 --encrypted --luks-version=luks2
+    
+    btrfs /boot --label=fedora_boot --data=single btrfs.2
+    btrfs none --label=fedora_fedora --data=single btrfs.3
+    
+    btrfs / --subvol --name=root fedora_fedora
+    btrfs /var --subvol --name=var fedora_fedora
+    btrfs /home --subvol --name=home fedora_fedora
+    """
+    with open('/tmp/partitions.ks', 'w') as f:
+        f.write(partitions_ks)
+    
+    # Debug output for partitions.ks
+    print("DEBUG: Generated /tmp/partitions.ks:")
+    print(partitions_ks)
+
+def get_disk_info(diskpath: str) -> Any:
+    # Gather disk info via lsblk
+    lsblk_cmd = [
+        "lsblk", "--bytes", "-Jo",
+        ("DISK-SEQ,NAME,KNAME,PKNAME,PATH,ID-LINK,SCHED,SIZE,START,PTTYPE,"
+         "TYPE,PARTN,PARTTYPE,PARTTYPENAME,PARTFLAGS,PARTLABEL,FSTYPE,"
+         "FSROOTS,MOUNTPOINTS"),
+        diskpath
+    ]
+    print(f"DEBUG: Running lsblk: {' '.join(lsblk_cmd)}")
+    try:
+        raw = subprocess.check_output(lsblk_cmd,
+                                      stderr=subprocess.PIPE,
+                                      text=True)
+        print("DEBUG: Raw lsblk output:")
+        print(raw)
+    except subprocess.CalledProcessError as err:
+        print(f"ERROR: lsblk failed: {err.stderr}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Parse JSON
+    print("DEBUG: Parsed JSON:")
+    try:
+        data = json.loads(raw)
+        print(json.dumps(data, indent=2))
+    except json.JSONDecodeError as err:
+        print(f"ERROR: Failed to parse JSON: {err}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Check if blockdevice
+    block_devices = data.get("blockdevices")
+
+    if not block_devices:
+        print(f"ERROR: No blockdevices entry for {diskpath}", file=sys.stderr)
+        return block_devices
+    if len(block_devices) != 1:
+        print(f"ERROR: Expected exactly one blockdevice entry for {diskpath}, found {len(block_devices)}", file=sys.stderr)
+        return False
+
+    print(f"INFO: Found blockdevices entry for {diskpath}")
+    return block_devices[0]
+
+def check_should_partition(diskpath: str, disk_info: dict ) -> bool:
+    
+    # Check if disk
+    disk_type = disk_info.get("type")
+    if disk_type != "disk":
+        print(f"ERROR: {diskpath} is type={disk_type}, not a disk",
+              file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"INFO: {diskpath} is confirmed as a whole disk.")
+    
+    should_partition = False
+    
+    # Check for existing partition table
+    disk_pttype = disk_info.get("pttype")
+    if disk_pttype:
+        print(f"INFO: {diskpath} has existing partition table type '{disk_pttype}'; skipping partitioning")
+        should_partition = False
+    else:
+      # No partition table
+      print(f"INFO: {diskpath} has no partition table, partition table type is '{disk_pttype}'.")
+    
+    
+      # Further check for a filesystem directly on the disk
+      disk_fstype = disk_info.get("fstype")
+      if disk_fstype:
+          print(f"INFO: {diskpath} has existing filesystem '{disk_fstype}'; skipping partitioning")
+          should_partition = False
+      else:
+          print(f"INFO: No filesystem detected on {diskpath}")
+          # This is the only condition where we do partitioning - no partition table and no FS
+          should_partition = True
+    
+    # Furhter check for existing partitions - should only be True when disk has partition table
+    if disk_info.get("children"):
+        should_partition = False
+    else:
+        print(f"INFO: {diskpath} has no partitions.")
+
+    return should_partition
+
+def do_device_settle():
+    # Wait for udev to settle
+    for ucmd in ['trigger', 'settle']:
+        subprocess.check_call(["udevadm", ucmd])
+        time.sleep(5)
+    
+    
+def do_wipe_parts(diskpath: str, disk_info: dict, wipe_parts: list ) -> bool:
+    disk_id_link = disk_info.get('id-link')
+    disk_parts = disk_info.get("children")
+    disk_pttype = disk_info.get("pttype")
+    if  disk_parts:
+        # If GPT exists or partitions exist, wipe partitions defined in wipe_parts
+        if disk_pttype in [ 'gpt' ] and disk_parts:
+            for p in disk_parts:
+                part_id_link = p.get("id-link")
+                partnumber = p.get("partno") or p.get("partn")
+                part_path = f"/dev/disk/by-id/{part_id_link}"
+                print(f"INFO: {diskpath} has existing partition: {part_path}")
+                #if part_id_link in [f"{disk_id_link}-part{i}" for i in wipe_parts]:
+                if partnumber and (int(partnumber) in wipe_parts):
+                    wipe_cmd = ["wipefs","--force","--all", part_path]
+                    print(f"DEBUG: Running wipe: {' '.join(wipe_cmd)}")
+                    subprocess.check_call(wipe_cmd)
+            print(f"INFO: signatures wiped on parts {wipe_parts} wiped.")
+    
+        partprobe_cmd = ["partprobe", diskpath]
+        print(f"DEBUG: Running partprobe: {' '.join(partprobe_cmd)}")
+        subprocess.check_call(partprobe_cmd)
+        do_device_settle()
+
+
+def do_partition(diskpath: str, root_end_mib: int):
+    # Disk is valid and empty – now partition it
+    print(f"INFO: Partitioning {diskpath}")
+    parted_cmd = [
+        "parted", "--script", diskpath,
+        "unit", "MiB",
+        "mklabel", "gpt",
+        "mkpart", "primary", "1", "2048",
+        "mkpart", "primary", "2048", "4096",
+        "mkpart", "primary", "4096", str(root_end_mib),
+        "set", "1", "boot", "on",
+        "set", "1", "esp", "on",
+        "set", "2", "bls_boot", "on",
+        "name", "1", "'EFI System Partition'",
+        "name", "2", "''",
+        "name", "3", "''"
+    ]
+    print(f"DEBUG: Running parted: {' '.join(parted_cmd)}")
+    subprocess.check_call(parted_cmd)
+
+    do_device_settle()
+
+    # Show free space after partitioning
+    print("INFO: Current partition layout (free space):")
+    subprocess.check_call([
+        "parted", "--script", diskpath,
+        "unit", "MiB", "print", "free"
+    ])
+
+def do_cryptsetup(partition: str, cryptpassword: str) -> str:
+ 
+    password=(cryptpassword + "\n").encode()
+    print(f"{password}")
+    subprocess.run([
+        "cryptsetup", "luksFormat", 
+        "--type", "luks2", 
+        "--batch-mode",
+        "-c", "aes-xts-plain64",
+        "-s", "512",
+        "-h", "sha512",
+        "-i", "5000",
+        "--use-random",
+        "--align-payload", "2048",
+        partition ], 
+        input=password,
+        check=True
+    )
+
+    do_device_settle()
+
+    uuid = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", partition], text=True).strip()
+
+    subprocess.run([
+        "cryptsetup", "open", 
+        "--type", "luks2", 
+        "--batch-mode",
+        "--allow-discards",
+        partition, 
+        f"luks-{uuid}" ], 
+        input=password,
+        check=True
+    )
+
+    do_device_settle()
+ 
+    print(f"INFO: Created LUKS device on {partition} with UUID {uuid} and opened it as luks-{uuid}")
+
+    return uuid
+
+
+def do_mkfs(part: str, parttype: str) -> str:
+    match parttype:
+        case 'EFI':
+            subprocess.check_call(["mkfs.vfat", "-F", '32', part])
+        case 'btrfs':
+            subprocess.check_call(["mkfs.btrfs", "-d", 'single', '-m', 'dup', part])
+        case _:
+            print(f"ERROR: Unsupported parttype {parttype} - exiting", file=sys.stderr)
+            sys.exit(1)
+
+    uuid = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", part], text=True).strip()
+    print(f"INFO: Formatted partition {part} as {parttype} with UUID {uuid}")
+    return uuid
+
+def do_btrfs_subvols(part: str, subvolumes: list):
+    mountpoint = "/btrfs"
+    print(f"Mounting {part} at {mountpoint}")
+    os.makedirs(mountpoint, exist_ok=True)
+    subprocess.check_call(["mount", '-o', 'rw,subvolid=5,compress=zstd:1,discard=async', part, mountpoint])
+    try:
+        for sub in subvolumes:
+            path = os.path.join(mountpoint, sub)
+            print(f"Creating btrfs subvolume {path}")
+            subprocess.check_call(["btrfs", "subvolume", "create", path])
+    finally:
+        print(f"Unmounting {mountpoint}")
+        subprocess.check_call(["umount", mountpoint])
+        os.rmdir(mountpoint)
+
+
+def do_write_disk_var_sh(esppart: str, bootpart: str, rootpart: str, bootdev: str):
+    disk_var_sh = os.path.join(os.environ['LOGDIR'], "disk_var.sh")
+    with open(disk_var_sh, "w") as f:
+        f.write(f'ESP_DEVICE="{esppart}"\n')
+        f.write(f'BOOT_PARTITION="{bootpart}"\n')
+        f.write(f'ROOT_PARTITION="{rootpart}"\n')
+        f.write(f'SWAPLIST=""\n')
+        f.write(f'BOOT_DEVICE="{bootdev}"\n')
+        f.write(f'PHYSICAL_BOOT_DEVICES="{bootdev}"\n')
+
+def do_write_crypttab(crypt_uuids: list):
+    crypttab = os.path.join(os.environ['LOGDIR'], "crypttab")
+    for crypt_uuid in crypt_uuids: 
+        with open(crypttab, "w") as f:
+            f.write(f'luks-{crypt_uuid} UUID={crypt_uuid} none luks,discard\n')
+
+
+def do_write_fstab(efi_uuid: str, boot_uuid: str, root_uuid: str):
+    fstab = os.path.join(os.environ['LOGDIR'], "fstab")
+    with open(fstab, "w") as f:
+        f.write(f"UUID={root_uuid} /         btrfs   rw,subvol=os,compress=zstd:1,x-systemd.device-timeout=0,discard=async 0 1\n")
+        f.write(f"UUID={boot_uuid} /boot    btrfs   rw,subvol=boot,compress=zstd:1,x-systemd.device-timeout=0,discard=async  0 2\n")
+        f.write(f"UUID={efi_uuid} /boot/efi vfat    rw,discard             0 2\n")
+
+def do_setup_storage(diskpath: str):
+    crypt_root_uuid = do_cryptsetup(partition=f"{diskpath}-part3", cryptpassword="hoonetorg")
+
+    efi_uuid = do_mkfs(part=f"{diskpath}-part1", parttype="EFI")
+    boot_uuid = do_mkfs(part=f"{diskpath}-part2", parttype="btrfs")
+    root_uuid = do_mkfs(part=f"/dev/mapper/luks-{crypt_root_uuid}", parttype="btrfs")
+
+    do_btrfs_subvols(part=f"{diskpath}-part2", subvolumes=[ 'boot' ])
+    do_btrfs_subvols(part=f"/dev/mapper/luks-{crypt_root_uuid}", subvolumes=[ 'os' ])
+
+    do_write_disk_var_sh(esppart=f"{diskpath}-part1", bootpart=f"{diskpath}-part2", rootpart=f"/dev/mapper/luks-{crypt_root_uuid}", bootdev=f"{diskpath}")
+
+    do_write_crypttab(crypt_uuids=[ crypt_root_uuid ])
+
+    do_write_fstab(efi_uuid=efi_uuid, boot_uuid=boot_uuid, root_uuid=root_uuid)
+
+
+def main():
+    ks = os.path.isdir("/usr/share/anaconda")
+    fai = os.path.isdir("/var/lib/fai")
+    if ks and fai:
+        print(f"ERROR: Found both Anaconda dir and FAI dir - can only be either or", file=sys.stderr)
+        sys.exit(1)
+
+    diskpath = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0-0-0-0"
+    rootsizemib = 20480
+    root_end_mib = 2048 + 2048 + rootsizemib # efi size + boot size + rootsizemib
+    wipe_parts = [ 1, 2, 3 ]
+
+    disk_info = get_disk_info(diskpath=diskpath)
+
+    if not disk_info:
+        print(f"ERROR: Couldn't get diskinfo {diskpath}", file=sys.stderr)
+        sys.exit(1)
+
+    should_partition = check_should_partition(diskpath=diskpath, disk_info=disk_info)
+
+    if disk_info.get("children"):
+        wiped = do_wipe_parts(diskpath=diskpath, disk_info=disk_info, wipe_parts=wipe_parts)
+
+    if should_partition:
+        do_partition(diskpath=diskpath, root_end_mib=root_end_mib)
+    else:
+        print("INFO: Partitioning skipped.")
+    
+    if ks:
+        write_ks_snippets(diskpath=diskpath)
+    elif fai:
+        do_setup_storage(diskpath)
+        subprocess.run(f"skiptask partition", shell=True, executable="/bin/bash", check=True)
+
+if __name__ == "__main__":
+    main()

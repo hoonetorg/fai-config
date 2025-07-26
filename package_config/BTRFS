@@ -1,0 +1,13 @@
+PACKAGES install DEBIAN
+cryptsetup
+cryptsetup-initramfs
+dosfstools
+btrfs-progs
+ntfs-3g
+
+PACKAGES dnfi ROCKY
+cryptsetup
+dosfstools
+btrfs-progs
+ntfs-3g
+ntfsprogs
