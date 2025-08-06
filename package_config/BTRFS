@@ -1,4 +1,5 @@
 PACKAGES install DEBIAN
+lvm2
 cryptsetup
 cryptsetup-initramfs
 dosfstools
