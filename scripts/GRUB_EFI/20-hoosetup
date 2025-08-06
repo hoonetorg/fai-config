@@ -1,0 +1,54 @@
+#! /bin/bash
+
+error=0; trap 'error=$(($?>$error?$?:$error))' ERR # save maximum error code
+
+# do only execute for Debian and similar distros
+if ! ifclass DEBIAN ; then
+    exit 0
+fi
+
+set -a
+
+# do not set up grub during dirinstall
+if [ "$FAI_ACTION" = "dirinstall" ] ; then
+    exit 0
+fi
+# during softupdate use this file
+[ -r $LOGDIR/disk_var.sh ] && . $LOGDIR/disk_var.sh
+
+if [ -z "$BOOT_DEVICE" ]; then
+    exit 189
+fi
+
+# skip the rest, if not an initial installation
+if [ $FAI_ACTION != "install" ]; then
+    $ROOTCMD update-grub
+    exit $error
+fi
+
+GROOT=$($ROOTCMD grub-probe -tdrive -d $BOOT_DEVICE)
+
+# ARM64 or AMD64
+arch=$(uname -m)
+if [ "$arch" == "aarch64" ]; then
+    opts="--no-floppy --modules=part_gpt"
+else
+    opts="--no-floppy --target=x86_64-efi --modules=part_gpt"
+fi
+
+if ifclass REMOVABLE ; then
+    opts="${opts} --removable"
+fi
+$ROOTCMD grub-install $opts "$GROOT"
+if [ $? -eq 0 ]; then
+    echo "Grub installed on $BOOT_DEVICE = $GROOT"
+fi
+
+$ROOTCMD update-grub
+if [[ $BOOT_DEVICE =~ '/dev/loop' ]]; then
+    :
+else
+    efibootmgr -v
+fi
+
+exit $error
