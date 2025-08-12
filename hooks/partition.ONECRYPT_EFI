@@ -351,7 +351,7 @@ def main():
 
     diskpath = os.environ["DISKPATH"]
     rootsizemib = int(os.environ["ROOTSIZEMIB"])
-    cryptpw = shlex.quote(str(os.environ.get("CRYPTPW", "notset")))
+    cryptpw = shlex.quote(str(os.environ.get("CRYPTPW", False)))
     root_end_mib = 2048 + 2048 + rootsizemib # efi size + boot size + rootsizemib
     wipeparts = [ 1, 2, 3 ]
 
@@ -374,6 +374,10 @@ def main():
     if ks:
         write_ks_snippets(diskpath=diskpath)
     elif fai:
+        if not cryptpw:
+            logging.error(f"cryptpw is not set, usually it must be set in hostconf of faibuilder which ensures an env var CRYPTPW is set in fai")
+            sys.exit(1)
+
         do_setup_storage(diskpath, cryptpw=cryptpw, dryrun=dryrun)
         subprocess_run_wrapper(cmd=f"skiptask partition", dryrun=dryrun, shell=True, executable="/bin/bash", check=True)
 
