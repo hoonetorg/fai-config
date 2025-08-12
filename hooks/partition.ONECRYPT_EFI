@@ -348,8 +348,6 @@ def main():
         logging.error(f"Found both Anaconda dir and FAI dir - can only be either or")
         sys.exit(1)
 
-    #diskpath = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0-0-0-0"
-    #rootsizemib = 20480
     diskpath = os.environ["DISKPATH"]
     rootsizemib = int(os.environ["ROOTSIZEMIB"])
     root_end_mib = 2048 + 2048 + rootsizemib # efi size + boot size + rootsizemib
