@@ -12,4 +12,4 @@ p=boot /boot      2G       ext4  rw,discard
 p=system -          40G      -      -
 
 disk_config cryptsetup
-luks:"hoonetorg" /      /dev/disk/by-id/scsi-definitelyNotExistingDisk-part3 ext4 rw,discard
+luks:"cryptpw" /      /dev/disk/by-id/scsi-definitelyNotExistingDisk-part3 ext4 rw,discard
