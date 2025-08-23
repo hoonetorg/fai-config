@@ -2,6 +2,7 @@ PACKAGES install DEBIAN
 lvm2
 cryptsetup
 cryptsetup-initramfs
+systemd-cryptsetup
 dosfstools
 btrfs-progs
 ntfs-3g
