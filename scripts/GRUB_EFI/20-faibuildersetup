@@ -39,6 +39,12 @@ fi
 if ifclass REMOVABLE ; then
     opts="${opts} --removable"
 fi
+
+if ifclass DESKTOP ; then
+    fcopy -v /etc/default/grub.d/90_splash.cfg
+    $ROOTCMD plymouth-set-default-theme bgrt -R
+fi
+
 $ROOTCMD grub-install $opts "$GROOT"
 if [ $? -eq 0 ]; then
     echo "Grub installed on $BOOT_DEVICE = $GROOT"
