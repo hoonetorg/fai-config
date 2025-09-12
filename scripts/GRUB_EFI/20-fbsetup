@@ -36,7 +36,7 @@ else
     opts="--no-floppy --target=x86_64-efi --modules=part_gpt"
 fi
 
-if ifclass REMOVABLE ; then
+if ifclass FBREMOVABLE ; then
     opts="${opts} --removable"
 fi
 
