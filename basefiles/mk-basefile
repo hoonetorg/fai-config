@@ -22,9 +22,11 @@
 
 # Define your local mirros here
 # For the first stage, set the CentOS/SLC mirror in /etc/rinse/rinse.conf
-MIRROR_DEBIAN=http://deb.debian.org/debian/
-MIRROR_UBUNTU=http://mirror.netcologne.de/ubuntu/
-MIRROR_CENTOS=http://mirror.netcologne.de/
+# debian 13.1 release second
+MIRROR_DEBIAN=http://127.0.0.1:3142/snapshot.debian.org/archive/debian/20250906T112439Z
+# ubuntu 24.04.3 release hour
+MIRROR_UBUNTU=http://127.0.0.1:3142/snapshot.ubuntu.com/ubuntu/20250804T190000Z
+MIRROR_CENTOS=http://127.0.0.1:3142/mirror.netcologne.de/
 
 EXCLUDE_SQUEEZE=isc-dhcp-client,isc-dhcp-common,info
 EXCLUDE_WHEEZY=info
