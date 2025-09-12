@@ -1,2 +1,4 @@
 class/50-host-classes
 class/FAIBUILDER.var
+basefiles/*
+!basefiles/mk-basefile
