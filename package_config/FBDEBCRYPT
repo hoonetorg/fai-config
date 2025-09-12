@@ -1,0 +1,6 @@
+PACKAGES install
+cryptsetup
+cryptsetup-initramfs
+
+PACKAGES install ! UBUNTU
+systemd-cryptsetup

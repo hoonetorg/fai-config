@@ -1,0 +1,5 @@
+PACKAGES install
+lvm2
+dosfstools
+btrfs-progs
+ntfs-3g
