@@ -2,5 +2,5 @@ PACKAGES install
 cryptsetup
 cryptsetup-initramfs
 
-PACKAGES install ! UBUNTU
+PACKAGES install FBTRIXIE
 systemd-cryptsetup
