@@ -40,7 +40,7 @@ if ifclass FBREMOVABLE ; then
     opts="${opts} --removable"
 fi
 
-if ifclass DESKTOP ; then
+if ifclass FBDESKTOP ; then
     fcopy -v /etc/default/grub.d/90_splash.cfg
     $ROOTCMD plymouth-set-default-theme bgrt -R
 fi
