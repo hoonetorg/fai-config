@@ -2,7 +2,7 @@
 #
 # p=<partlabel> <mountpoint> <size>   <fs type> <mount options> <misc options>
 
-# efi version of ONECRYPT, ensuring that even if hook doesn't do skiptask partition 
+# efi version of FBONECRYPT, ensuring that even if hook doesn't do skiptask partition 
 # no disk with important data is erased and partitioning fails
 
 disk_config /dev/disk/by-id/scsi-definitelyNotExistingDisk disklabel:gpt bootable:1 fstabkey:uuid align-at:1M
