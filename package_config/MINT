@@ -1,4 +1,14 @@
-# list is a package list for Linux Mint xfce zara
+# list is a package list for Linux Mint 22.2 zara for XFCE
+# only additional packages that were added for 22.2
+
+PACKAGES install-norec
+fingwit
+geoclue-2.0
+gnome-calendar
+gnome-font-viewer
+
+
+# This list is a package list for Linux Mint xfce xia (22.1)
 # the list was reduced so most dependencies are not listed
 
 PACKAGES install-norec
@@ -244,11 +254,7 @@ lightdm-settings
 light-locker
 light-locker-settings
 linux-generic
-linux-headers-6.8.0-51-generic
-linux-image-6.8.0-51-generic
-linux-modules-extra-6.8.0-51-generic
-linux-tools-6.8.0-57
-linux-tools-6.8.0-57-generic
+linux-tools-generic
 lm-sensors
 login
 logrotate
