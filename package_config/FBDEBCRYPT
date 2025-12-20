@@ -1,6 +1,0 @@
-PACKAGES install
-cryptsetup
-cryptsetup-initramfs
-
-PACKAGES install FBTRIXIE
-systemd-cryptsetup

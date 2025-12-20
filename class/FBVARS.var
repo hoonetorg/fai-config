@@ -1,0 +1,12 @@
+if ifclass DEBIAN; then
+  if [ -z "$grubefisignedpkgname" ]; then
+    _arch=$(dpkg --print-architecture 2>/dev/null)
+    case $_arch in
+        i386)
+            grubefisignedpkgname=grub-efi-ia32-signed ;;
+        *)
+            grubefisignedpkgname=grub-efi-${_arch}-signed
+    esac
+    unset _arch
+  fi
+fi

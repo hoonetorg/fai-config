@@ -1,0 +1,4 @@
+#! /bin/bash
+# fix not saving logs 
+
+mkdir -p $FAI_ROOT/var/log/fai

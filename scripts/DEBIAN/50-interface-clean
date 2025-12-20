@@ -1,0 +1,15 @@
+#! /bin/bash
+
+case "$FAI_ACTION" in
+  install|dirinstall)
+    if [ -f $target/etc/NetworkManager/NetworkManager.conf ]; then
+        RENDERER=NetworkManager
+    else
+        RENDERER=networkd
+    fi
+    if [ -d $target/etc/netplan ] && [ "$RENDERER" = "NetworkManager" ]; then
+        rm $target/etc/netplan/*.yaml
+    fi
+esac
+
+exit $error

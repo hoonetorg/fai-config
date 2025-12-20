@@ -1,0 +1,6 @@
+#! /bin/bash
+
+# repair resolv.conf in Noble as we install it 
+if [ -x "$target/usr/lib/systemd/systemd-resolved" ]; then
+  ln -fs ../run/systemd/resolve/stub-resolv.conf $target/etc/resolv.conf
+fi 
