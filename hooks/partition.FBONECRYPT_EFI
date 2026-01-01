@@ -45,11 +45,11 @@ def write_ks_snippets(diskpath: str, disklayout: dict):
     partitions_ks = f"""
     ignoredisk --only-use={diskpath}
     part /boot/efi {efi_fstype_opt} --onpart={diskpath}-part{esp_number} {efi_noformat_opt} --fsoptions="umask=0077,shortname=winnt"
-    part btrfs.2 --fstype="btrfs" --onpart={diskpath}-part{boot_number}
-    part btrfs.3 --fstype="btrfs" --onpart={diskpath}-part{root_number} --encrypted --luks-version=luks2
+    part btrfs.{boot_number} --fstype="btrfs" --onpart={diskpath}-part{boot_number}
+    part btrfs.{root_number} --fstype="btrfs" --onpart={diskpath}-part{root_number} --encrypted --luks-version=luks2
     
-    btrfs /boot --label=fedora_boot --data=single btrfs.2
-    btrfs none --label=fedora_fedora --data=single btrfs.3
+    btrfs /boot --label=fedora_boot --data=single btrfs.{boot_number}
+    btrfs none --label=fedora_fedora --data=single btrfs.{root_number} 
     
     btrfs / --subvol --name=root fedora_fedora
     btrfs /var --subvol --name=var fedora_fedora
@@ -153,6 +153,9 @@ def check_should_partition(diskpath: str, diskinfo: dict) -> bool:
 
     # Furhter check for existing partitions - should only be True when disk has partition table
     if diskinfo.get("children"):
+        logging.info(
+            f"{diskpath} has probably existing partitions; skipping partitioning"
+        )
         should_partition = False
     else:
         logging.info(f"{diskpath} has no partitions.")
@@ -186,7 +189,6 @@ def do_wipeparts(
                 partnumber = p.get("partno") or p.get("partn")
                 partpath = f"/dev/disk/by-id/{partid_link}"
                 logging.info(f"{diskpath} has existing partition: {partpath}")
-                # if partid_link in [f"{diskid_link}-part{i}" for i in wipeparts]:
                 if partnumber and (int(partnumber) in wipeparts):
                     subprocess_run_wrapper(
                         cmd=f"wipefs --force --all {shlex.quote(partpath)}",
@@ -211,6 +213,16 @@ def do_partition(diskpath: str, disklayout: dict, dryrun: bool = False):
     esp_end_mib = start_mib + esp_mib  # usually 2048
     boot_end_mib = esp_end_mib + boot_mib  # usually 4096
     root_end_mib = boot_end_mib + root_mib  # usually 4096  + rootsizemib
+
+    logging.info(
+        f"ESP: number: {esp_number}, size(MiB): {esp_mib}, start(MiB): {start_mib}, end(MiB): {esp_end_mib}"
+    )
+    logging.info(
+        f"boot: number: {boot_number}, size(MiB): {boot_mib}, start(MiB): {esp_end_mib}, end(MiB): {boot_end_mib}"
+    )
+    logging.info(
+        f"root: number: {root_number}, size(MiB): {root_mib}, start(MiB): {boot_end_mib}, end(MiB): {root_end_mib}"
+    )
 
     logging.info(f"Partitioning {diskpath}")
     subprocess_run_wrapper(
@@ -253,6 +265,13 @@ def do_add_partitions(
     root_mib = disklayout["root"]["sizemib"]
     boot_end_mib = start_mib + boot_mib
     root_end_mib = boot_end_mib + root_mib
+
+    logging.info(
+        f"boot: number: {boot_number}, size(MiB): {boot_mib}, start(MiB): {start_mib}, end(MiB): {boot_end_mib}"
+    )
+    logging.info(
+        f"root: number: {root_number}, size(MiB): {root_mib}, start(MiB): {boot_end_mib}, end(MiB): {root_end_mib}"
+    )
 
     logging.info(f"Partitioning {diskpath}")
     subprocess_run_wrapper(
@@ -311,6 +330,9 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
         text=True,
         check=True,
     )
+
+    logging.info("Current partition layout (free space):\n{r.stdout}")
+
     if dryrun or r is None:
         return []
 
@@ -340,6 +362,9 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
             # if free space doesn't start at MIB boundaries it couldn't be the right free space after the partition where we search for the free space after
             if "." in fields[1].strip():
                 continue
+            logging.info(
+                "Adding partition entry kind: free, start: {start}, end: {end}"
+            )
             entries.append({"kind": "free", "start": start, "end": end})
             continue
 
@@ -353,9 +378,11 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
         except Exception:
             logging.error(f"cannot parse partition number from line: {line!r}")
             sys.exit(1)
+        logging.info("Adding partition entry kind: part, start: {start}, end: {end}")
         entries.append({"kind": "part", "n": n, "start": start, "end": end})
 
     # Entries are already in physical order because parted prints them that way.
+    logging.info("Partition entries: {entries}")
     return entries
 
 
@@ -433,6 +460,15 @@ def get_start_mib_after_partnumber(
         )
         sys.exit(1)
 
+    logging.info(
+        f"Free space after partition {partnumber} begins at the end of partition {partnumber} at {int(start_mib)}MiB which is the start of free space at {int(free_after['start'])}MiB"
+    )
+    logging.info(
+        f"Free space after partition {partnumber} ends at {int(free_after['end'])}MiB"
+    )
+    logging.info(
+        f"Free space after partition {partnumber} has therefore a size {avail_mib}MiB"
+    )
     return (start_mib, avail_mib)
 
 
@@ -591,7 +627,9 @@ def get_uuid_of_existing_fs(part: str, dryrun: bool = False) -> str:
         capture_output=True,
         text=True,
     )
-    return (cp.stdout or "").strip()
+    uuid = (cp.stdout or "").strip()
+    logging.info(f"Partition {part} has following filesystem UUID: {uuid}")
+    return uuid
 
 
 def do_setup_storage(
