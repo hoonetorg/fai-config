@@ -292,7 +292,8 @@ def mib_to_int(token: str) -> int:
     """
     t = token.strip()
     if not t.endswith("MiB"):
-        raise SystemExit(f"unexpected unit (expected MiB): {token!r}")
+        logging.error(f"unexpected unit (expected MiB): {token!r}")
+        sys.exit(1)
     t = t[:-3]  # drop 'MiB'
     if "." in t:
         t = t.split(".", 1)[0]
@@ -350,7 +351,8 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
         try:
             n = int(fields[0].strip())
         except Exception:
-            raise SystemExit(f"cannot parse partition number from line: {line!r}")
+            logging.error(f"cannot parse partition number from line: {line!r}")
+            sys.exit(1)
         entries.append({"kind": "part", "n": n, "start": start, "end": end})
 
     # Entries are already in physical order because parted prints them that way.
@@ -379,9 +381,10 @@ def get_start_mib_after_partnumber(
             p = e
             break
     if p is None:
-        raise SystemExit(
+        logging.error(
             f"{diskpath}: partition {partnumber} not found or ignored (likely fractional END in parted output)"
         )
+        sys.exit(1)
 
     # search for partitions that physically come after partnumber on disk (parted output lists parts sorted by physical position not part number)
     later_parts = [e for e in entries[idx_p + 1 :] if e["kind"] == "part"]
@@ -389,9 +392,10 @@ def get_start_mib_after_partnumber(
         later_desc = ", ".join(
             f"p{e['n']}@{e['start']}-{e['end']}MiB" for e in later_parts
         )
-        raise SystemExit(
+        logging.error(
             f"{diskpath}: partitions exist after p{partnumber}: {later_desc}. Refusing."
         )
+        sys.exit(1)
 
     start_mib = int(p["end"])
 
@@ -410,22 +414,24 @@ def get_start_mib_after_partnumber(
             break
 
     if free_after is None:
-        raise SystemExit(
+        logging.error(
             f"{diskpath}: no free region immediately after/covering start_mib={start_mib}MiB following p{partnumber}."
         )
+        sys.exit(1)
 
     avail_mib = int(free_after["end"]) - start_mib
 
     if avail_mib < min_tail_free_mib:
-        raise SystemExit(
+        logging.error(
             f"{diskpath}: free space after p{partnumber} too small: {avail_mib}MiB < {min_tail_free_mib}MiB."
         )
+        sys.exit(1)
 
     if avail_mib < required_mib:
-        raise SystemExit(
-            f"{diskpath}: insufficient free space after p{partnumber}: need={required_mib}MiB, available={avail_mib}MiB "
-            f"(from {start_mib}MiB to {free_after['end']}MiB)."
+        logging.error(
+            f"{diskpath}: insufficient free space after p{partnumber}: need={required_mib}MiB, available={avail_mib}MiB (from {start_mib}MiB to {free_after['end']}MiB)."
         )
+        sys.exit(1)
 
     return (start_mib, avail_mib)
 
