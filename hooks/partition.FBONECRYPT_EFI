@@ -2,7 +2,6 @@
 import logging
 
 import os
-from pathlib import Path
 import sys
 import subprocess
 import shlex
@@ -11,8 +10,12 @@ from typing import Any
 import json
 import time
 
+import re
 
-def subprocess_run_wrapper(cmd: str, dryrun: bool = False, **kwargs) -> subprocess.CompletedProcess | None:
+
+def subprocess_run_wrapper(
+    cmd: str, dryrun: bool = False, **kwargs
+) -> subprocess.CompletedProcess | None:
     if kwargs.get("shell"):
         wcmd = cmd
     else:
@@ -25,17 +28,25 @@ def subprocess_run_wrapper(cmd: str, dryrun: bool = False, **kwargs) -> subproce
     logging.info(f"[EXECUTING] {cmd}")
     return subprocess.run(wcmd, **kwargs)
 
-def write_ks_snippets(diskpath: str):
+
+def write_ks_snippets(diskpath: str, disklayout: dict):
+    esp_number = disklayout["esp"]["number"]
+    boot_number = disklayout["boot"]["number"]
+    root_number = disklayout["root"]["number"]
+
+    efi_fstype_opt = '--fstype="efi"' if disklayout["esp"]["wipe"] else "              "
+    efi_noformat_opt = "--noformat" if not disklayout["esp"]["wipe"] else ""
+
     # Persist the disk identifier without newline
-    with open('/tmp/disk-id', 'w') as f:
+    with open("/tmp/disk-id", "w") as f:
         f.write(diskpath)
-    
+
     # Generate partitions.ks Kickstart fragment
     partitions_ks = f"""
     ignoredisk --only-use={diskpath}
-    part /boot/efi --fstype="efi" --onpart={diskpath}-part1 --fsoptions="umask=0077,shortname=winnt"
-    part btrfs.2 --fstype="btrfs" --onpart={diskpath}-part2
-    part btrfs.3 --fstype="btrfs" --onpart={diskpath}-part3 --encrypted --luks-version=luks2
+    part /boot/efi {efi_fstype_opt} --onpart={diskpath}-part{esp_number} {efi_noformat_opt} --fsoptions="umask=0077,shortname=winnt"
+    part btrfs.2 --fstype="btrfs" --onpart={diskpath}-part{boot_number}
+    part btrfs.3 --fstype="btrfs" --onpart={diskpath}-part{root_number} --encrypted --luks-version=luks2
     
     btrfs /boot --label=fedora_boot --data=single btrfs.2
     btrfs none --label=fedora_fedora --data=single btrfs.3
@@ -44,28 +55,29 @@ def write_ks_snippets(diskpath: str):
     btrfs /var --subvol --name=var fedora_fedora
     btrfs /home --subvol --name=home fedora_fedora
     """
-    with open('/tmp/partitions.ks', 'w') as f:
+    with open("/tmp/partitions.ks", "w") as f:
         f.write(partitions_ks)
-    
+
     # Debug output for partitions.ks
     logging.info(f"Generated /tmp/partitions.ks:\n{partitions_ks}")
+
 
 def get_diskinfo(diskpath: str, dryrun: bool = False) -> Any:
     # Gather disk info via lsblk
     try:
         result = subprocess_run_wrapper(
             cmd=(
-               "lsblk --bytes -Jo "
-               "DISK-SEQ,NAME,KNAME,PKNAME,PATH,ID-LINK,SCHED,SIZE,START,PTTYPE,"
-               "TYPE,PARTN,PARTTYPE,PARTTYPENAME,PARTFLAGS,PARTLABEL,FSTYPE,"
-               "FSROOTS,MOUNTPOINTS "
-               f"{shlex.quote(diskpath)}"
+                "lsblk --bytes -Jo "
+                "DISK-SEQ,NAME,KNAME,PKNAME,PATH,ID-LINK,SCHED,SIZE,START,PTTYPE,"
+                "TYPE,PARTN,PARTTYPE,PARTTYPENAME,PARTFLAGS,PARTLABEL,FSTYPE,"
+                "FSROOTS,MOUNTPOINTS "
+                f"{shlex.quote(diskpath)}"
             ),
             dryrun=dryrun,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=True
+            check=True,
         )
 
         if dryrun or result is None:
@@ -76,16 +88,16 @@ def get_diskinfo(diskpath: str, dryrun: bool = False) -> Any:
     except subprocess.CalledProcessError as err:
         logging.error(f"lsblk failed: {err.stderr}")
         sys.exit(1)
-    
+
     # Parse JSON
-    logging.info(f"Parsed JSON:")
+    logging.info("Parsed JSON:")
     try:
         data = json.loads(raw)
         logging.info(f"JSON loads lsblk output:\n{json.dumps(data, indent=2)}")
     except json.JSONDecodeError as err:
         logging.error(f"Failed to parse JSON: {err}")
         sys.exit(1)
-    
+
     # Check if blockdevice
     blockdevices = data.get("blockdevices")
 
@@ -93,44 +105,52 @@ def get_diskinfo(diskpath: str, dryrun: bool = False) -> Any:
         logging.error(f"No blockdevices entry for {diskpath}")
         return blockdevices
     if len(blockdevices) != 1:
-        logging.error(f"Expected exactly one blockdevice entry for {diskpath}, found {len(blockdevices)}")
+        logging.error(
+            f"Expected exactly one blockdevice entry for {diskpath}, found {len(blockdevices)}"
+        )
         return False
 
     logging.info(f"Found blockdevices entry for {diskpath}")
     return blockdevices[0]
 
-def check_should_partition(diskpath: str, diskinfo: dict ) -> bool:
-    
+
+def check_should_partition(diskpath: str, diskinfo: dict) -> bool:
+
     # Check if disk
     disktype = diskinfo.get("type")
     if disktype != "disk":
         logging.error(f"{diskpath} is type={disktype}, not a disk")
         sys.exit(1)
-    
+
     logging.info(f"{diskpath} is confirmed as a whole disk.")
-    
+
     should_partition = False
-    
+
     # Check for existing partition table
     diskpttype = diskinfo.get("pttype")
     if diskpttype:
-        logging.info(f"{diskpath} has existing partition table type '{diskpttype}'; skipping partitioning")
+        logging.info(
+            f"{diskpath} has existing partition table type '{diskpttype}'; skipping partitioning"
+        )
         should_partition = False
     else:
-      # No partition table
-      logging.info(f"{diskpath} has no partition table, partition table type is '{diskpttype}'.")
-    
-    
-      # Further check for a filesystem directly on the disk
-      disk_fstype = diskinfo.get("fstype")
-      if disk_fstype:
-          logging.info(f"{diskpath} has existing filesystem '{disk_fstype}'; skipping partitioning")
-          should_partition = False
-      else:
-          logging.info(f"No filesystem detected on {diskpath}")
-          # This is the only condition where we do partitioning - no partition table and no FS
-          should_partition = True
-    
+        # No partition table
+        logging.info(
+            f"{diskpath} has no partition table, partition table type is '{diskpttype}'."
+        )
+
+        # Further check for a filesystem directly on the disk
+        disk_fstype = diskinfo.get("fstype")
+        if disk_fstype:
+            logging.info(
+                f"{diskpath} has existing filesystem '{disk_fstype}'; skipping partitioning"
+            )
+            should_partition = False
+        else:
+            logging.info(f"No filesystem detected on {diskpath}")
+            # This is the only condition where we do partitioning - no partition table and no FS
+            should_partition = True
+
     # Furhter check for existing partitions - should only be True when disk has partition table
     if diskinfo.get("children"):
         should_partition = False
@@ -139,83 +159,296 @@ def check_should_partition(diskpath: str, diskinfo: dict ) -> bool:
 
     return should_partition
 
+
 def do_device_settle(dryrun: bool = False):
     # Wait for udev to settle
-    for ucmd in ['trigger', 'settle']:
+    for ucmd in ["trigger", "settle"]:
         subprocess_run_wrapper(cmd=f"udevadm {shlex.quote(ucmd)}", dryrun=dryrun)
         time.sleep(5)
-    
-    
-def do_wipeparts(diskpath: str, diskinfo: dict, wipeparts: list, dryrun: bool = False) -> bool:
-    diskid_link = diskinfo.get('id-link')
+
+
+def do_wipeparts(
+    diskpath: str, diskinfo: dict, disklayout: dict, dryrun: bool = False
+) -> bool:
+
+    wipeparts = sorted(
+        part["number"] for part in disklayout.values() if part.get("wipe")
+    )
+
+    diskid_link = diskinfo.get("id-link")
     diskparts = diskinfo.get("children")
     diskpttype = diskinfo.get("pttype")
-    if  diskparts:
+    if diskparts:
         # If GPT exists or partitions exist, wipe partitions defined in wipeparts
-        if diskpttype in [ 'gpt' ] and diskparts:
+        if diskpttype in ["gpt"] and diskparts:
             for p in diskparts:
                 partid_link = p.get("id-link")
                 partnumber = p.get("partno") or p.get("partn")
                 partpath = f"/dev/disk/by-id/{partid_link}"
                 logging.info(f"{diskpath} has existing partition: {partpath}")
-                #if partid_link in [f"{diskid_link}-part{i}" for i in wipeparts]:
+                # if partid_link in [f"{diskid_link}-part{i}" for i in wipeparts]:
                 if partnumber and (int(partnumber) in wipeparts):
-                    subprocess_run_wrapper(cmd=f"wipefs --force --all {shlex.quote(partpath)}", dryrun=dryrun)
+                    subprocess_run_wrapper(
+                        cmd=f"wipefs --force --all {shlex.quote(partpath)}",
+                        dryrun=dryrun,
+                    )
             logging.info(f"signatures wiped on parts {wipeparts} wiped.")
-    
+
         subprocess_run_wrapper(cmd=f"partprobe {shlex.quote(diskpath)}", dryrun=dryrun)
         do_device_settle(dryrun=dryrun)
 
-def do_partition(diskpath: str, root_end_mib: int, dryrun: bool = False):
+
+def do_partition(diskpath: str, disklayout: dict, dryrun: bool = False):
     # Disk is valid and empty – now partition it
+    esp_number = disklayout["esp"]["number"]
+    boot_number = disklayout["boot"]["number"]
+    root_number = disklayout["root"]["number"]
+
+    start_mib = 1
+    esp_mib = disklayout["esp"]["sizemib"]
+    boot_mib = disklayout["boot"]["sizemib"]
+    root_mib = disklayout["root"]["sizemib"]
+    esp_end_mib = start_mib + esp_mib  # usually 2048
+    boot_end_mib = esp_end_mib + boot_mib  # usually 4096
+    root_end_mib = boot_end_mib + root_mib  # usually 4096  + rootsizemib
+
     logging.info(f"Partitioning {diskpath}")
-    subprocess_run_wrapper(cmd=(
-        "parted --script "
-        f"{shlex.quote(diskpath)} "
-        "unit MiB "
-        "mklabel gpt "
-        "mkpart primary 1 2048 "
-        "mkpart primary 2048 4096 "
-        f"mkpart primary 4096 {shlex.quote(str(root_end_mib))} "
-        "set 1 boot on "
-        "set 1 esp on "
-        "set 2 bls_boot on "
-        f"name 1 {shlex.quote("'EFI System Partition'")} "
-        f"name 2 {shlex.quote("''")} "
-        f"name 3 {shlex.quote("''")}"
+    subprocess_run_wrapper(
+        cmd=(
+            "parted --script "
+            f"{shlex.quote(diskpath)} "
+            "unit MiB "
+            "mklabel gpt "
+            f"mkpart primary {shlex.quote(str(start_mib))} {shlex.quote(str(esp_end_mib))} "
+            f"mkpart primary {shlex.quote(str(esp_end_mib))} {shlex.quote(str(boot_end_mib))} "
+            f"mkpart primary {shlex.quote(str(boot_end_mib))} {shlex.quote(str(root_end_mib))} "
+            f"set {shlex.quote(str(esp_number))} boot on "
+            f"set {shlex.quote(str(esp_number))} esp on "
+            f"set {shlex.quote(str(boot_number))} bls_boot on "
+            f"name {shlex.quote(str(esp_number))} {shlex.quote("'EFI System Partition'")} "
+            f"name {shlex.quote(str(boot_number))} {shlex.quote("''")} "
+            f"name {shlex.quote(str(root_number))} {shlex.quote("''")}"
         ),
-        dryrun=dryrun)
+        dryrun=dryrun,
+    )
 
     subprocess_run_wrapper(cmd=f"partprobe {shlex.quote(diskpath)}", dryrun=dryrun)
     do_device_settle(dryrun=dryrun)
 
     # Show free space after partitioning
-    logging.info(f"Current partition layout (free space):")
-    subprocess_run_wrapper(cmd=(
-        "parted --script "
-        f"{shlex.quote(diskpath)} "
-        "unit MiB print free"
+    logging.info("Current partition layout (free space):")
+    subprocess_run_wrapper(
+        cmd=("parted --script " f"{shlex.quote(diskpath)} " "unit MiB print free"),
+        dryrun=dryrun,
+    )
+
+
+def do_add_partitions(
+    diskpath: str, disklayout: dict, start_mib: int, dryrun: bool = False
+):
+    boot_number = disklayout["boot"]["number"]
+    root_number = disklayout["root"]["number"]
+
+    boot_mib = disklayout["boot"]["sizemib"]
+    root_mib = disklayout["root"]["sizemib"]
+    boot_end_mib = start_mib + boot_mib
+    root_end_mib = boot_end_mib + root_mib
+
+    logging.info(f"Partitioning {diskpath}")
+    subprocess_run_wrapper(
+        cmd=(
+            "parted --script "
+            f"{shlex.quote(diskpath)} "
+            "unit MiB "
+            f"mkpart primary {shlex.quote(str(start_mib))} {shlex.quote(str(boot_end_mib))} "
+            f"mkpart primary {shlex.quote(str(boot_end_mib))} {shlex.quote(str(root_end_mib))} "
+            f"set {shlex.quote(str(boot_number))} bls_boot on "
+            f"name {shlex.quote(str(boot_number))} {shlex.quote("''")} "
+            f"name {shlex.quote(str(root_number))} {shlex.quote("''")}"
         ),
-        dryrun=dryrun)
+        dryrun=dryrun,
+    )
+
+    subprocess_run_wrapper(cmd=f"partprobe {shlex.quote(diskpath)}", dryrun=dryrun)
+    do_device_settle(dryrun=dryrun)
+
+    # Show free space after partitioning
+    logging.info("Current partition layout (free space):")
+    subprocess_run_wrapper(
+        cmd=("parted --script " f"{shlex.quote(diskpath)} " "unit MiB print free"),
+        dryrun=dryrun,
+    )
+
+
+def parted_is_free_row(fields: list[str]) -> bool:
+    # Format: N:START:END:SIZE:FS=free
+    return len(fields) == 5 and fields[4].strip().lower() == "free"
+
+
+def mib_to_int(token: str) -> int:
+    """
+    Convert '413696MiB' or '0.02MiB' to int MiB by truncating after '.'.
+    No floats used.
+    """
+    t = token.strip()
+    if not t.endswith("MiB"):
+        raise SystemExit(f"unexpected unit (expected MiB): {token!r}")
+    t = t[:-3]  # drop 'MiB'
+    if "." in t:
+        t = t.split(".", 1)[0]
+    if t == "":
+        return 0
+    return int(t)
+
+
+def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
+    r = subprocess_run_wrapper(
+        cmd=f"parted -m -s {shlex.quote(diskpath)} unit MiB print free",
+        dryrun=dryrun,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    if dryrun or r is None:
+        return []
+
+    entries = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if (
+            not line
+            or line.startswith("BYT;")
+            or line.startswith(diskpath)
+            or not re.match(r"^[1-9][0-9]*:", line)
+        ):
+            continue
+
+        # Strip trailing ';' to avoid empty last field issues
+        if line.endswith(";"):
+            line = line[:-1]
+
+        fields = line.split(":")
+        if len(fields) < 4:
+            continue
+
+        start = mib_to_int(fields[1].strip())
+        end = mib_to_int(fields[2].strip())
+
+        if parted_is_free_row(fields):
+            # if free space doesn't start at MIB boundaries it couldn't be the right free space after the partition where we search for the free space after
+            if "." in fields[1].strip():
+                continue
+            entries.append({"kind": "free", "start": start, "end": end})
+            continue
+
+        # if end is not on MiB boundaries and a float we don't use this partition
+        if "." in fields[2].strip():
+            continue
+
+        # Partition row: first column is partition number here
+        try:
+            n = int(fields[0].strip())
+        except Exception:
+            raise SystemExit(f"cannot parse partition number from line: {line!r}")
+        entries.append({"kind": "part", "n": n, "start": start, "end": end})
+
+    # Entries are already in physical order because parted prints them that way.
+    return entries
+
+
+def get_start_mib_after_partnumber(
+    diskpath: str,
+    required_mib: int,
+    partnumber: int,
+    dryrun: bool = False,
+) -> tuple[int, int]:
+
+    min_tail_free_mib = 1
+    entries = read_parted_entries(diskpath, dryrun=dryrun)
+    if dryrun:
+        # FIXME
+        return (0, 0)
+
+    # Locate partnumber
+    p = None
+    idx_p = None
+    for i, e in enumerate(entries):
+        if e["kind"] == "part" and e["n"] == partnumber:
+            idx_p = i
+            p = e
+            break
+    if p is None:
+        raise SystemExit(
+            f"{diskpath}: partition {partnumber} not found or ignored (likely fractional END in parted output)"
+        )
+
+    # search for partitions that physically come after partnumber on disk (parted output lists parts sorted by physical position not part number)
+    later_parts = [e for e in entries[idx_p + 1 :] if e["kind"] == "part"]
+    if later_parts:
+        later_desc = ", ".join(
+            f"p{e['n']}@{e['start']}-{e['end']}MiB" for e in later_parts
+        )
+        raise SystemExit(
+            f"{diskpath}: partitions exist after p{partnumber}: {later_desc}. Refusing."
+        )
+
+    start_mib = int(p["end"])
+
+    # Find a free region that starts at start_mib after partnumber
+    free_after = None
+    for e in entries[idx_p + 1 :]:
+        if e["kind"] != "free":
+            continue
+        # cover start_mib
+        if e["start"] == start_mib and e["end"] > start_mib:
+            free_after = e
+            break
+        # allow exact boundary (start==end is useless but we handle it below, can be free space less than 1MiB)
+        if e["start"] == start_mib and e["end"] == start_mib:
+            free_after = e
+            break
+
+    if free_after is None:
+        raise SystemExit(
+            f"{diskpath}: no free region immediately after/covering start_mib={start_mib}MiB following p{partnumber}."
+        )
+
+    avail_mib = int(free_after["end"]) - start_mib
+
+    if avail_mib < min_tail_free_mib:
+        raise SystemExit(
+            f"{diskpath}: free space after p{partnumber} too small: {avail_mib}MiB < {min_tail_free_mib}MiB."
+        )
+
+    if avail_mib < required_mib:
+        raise SystemExit(
+            f"{diskpath}: insufficient free space after p{partnumber}: need={required_mib}MiB, available={avail_mib}MiB "
+            f"(from {start_mib}MiB to {free_after['end']}MiB)."
+        )
+
+    return (start_mib, avail_mib)
+
 
 def do_cryptsetup(partition: str, cryptpw: str, dryrun: bool = False) -> str:
- 
-    password=(cryptpw + "\n").encode()
-    subprocess_run_wrapper(cmd=(
-        "cryptsetup luksFormat " 
-        "--type luks2 " 
-        "--batch-mode "
-        "-c aes-xts-plain64 "
-        "-s 512 "
-        "-h sha512 "
-        "-i 5000 "
-        "--use-random "
-        "--align-payload 2048 "
-        f"{shlex.quote(partition)}" 
+
+    password = (cryptpw + "\n").encode()
+    subprocess_run_wrapper(
+        cmd=(
+            "cryptsetup luksFormat "
+            "--type luks2 "
+            "--batch-mode "
+            "-c aes-xts-plain64 "
+            "-s 512 "
+            "-h sha512 "
+            "-i 5000 "
+            "--use-random "
+            "--align-payload 2048 "
+            f"{shlex.quote(partition)}"
         ),
         dryrun=dryrun,
         input=password,
-        check=True
+        check=True,
     )
 
     do_device_settle(dryrun=dryrun)
@@ -226,40 +459,47 @@ def do_cryptsetup(partition: str, cryptpw: str, dryrun: bool = False) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        check=True
-        )
+        check=True,
+    )
 
     if dryrun or result is None:
         return None
 
     uuid = result.stdout.strip()
 
-    subprocess_run_wrapper(cmd=(
-        "cryptsetup open " 
-        "--type luks2 " 
-        "--batch-mode "
-        "--allow-discards "
-        f"{shlex.quote(partition)} " 
-        f"luks-{shlex.quote(uuid)}"
-        ), 
+    subprocess_run_wrapper(
+        cmd=(
+            "cryptsetup open "
+            "--type luks2 "
+            "--batch-mode "
+            "--allow-discards "
+            f"{shlex.quote(partition)} "
+            f"luks-{shlex.quote(uuid)}"
+        ),
         dryrun=dryrun,
         input=password,
-        check=True
+        check=True,
     )
 
     do_device_settle(dryrun=dryrun)
- 
-    logging.info(f"Created LUKS device on {partition} with UUID {uuid} and opened it as luks-{uuid}")
+
+    logging.info(
+        f"Created LUKS device on {partition} with UUID {uuid} and opened it as luks-{uuid}"
+    )
 
     return uuid
 
 
 def do_mkfs(part: str, parttype: str, dryrun: bool = False) -> str:
     match parttype:
-        case 'EFI':
-            subprocess_run_wrapper(cmd=f"mkfs.vfat -F 32 {shlex.quote(part)}", dryrun=dryrun)
-        case 'btrfs':
-            subprocess_run_wrapper(cmd=f"mkfs.btrfs -d single -m dup {shlex.quote(part)}", dryrun=dryrun)
+        case "EFI":
+            subprocess_run_wrapper(
+                cmd=f"mkfs.vfat -F 32 {shlex.quote(part)}", dryrun=dryrun
+            )
+        case "btrfs":
+            subprocess_run_wrapper(
+                cmd=f"mkfs.btrfs -d single -m dup {shlex.quote(part)}", dryrun=dryrun
+            )
         case _:
             logging.error(f"Unsupported parttype {parttype} - exiting")
             sys.exit(1)
@@ -270,8 +510,8 @@ def do_mkfs(part: str, parttype: str, dryrun: bool = False) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        check=True
-        )
+        check=True,
+    )
 
     if dryrun or result is None:
         return None
@@ -282,16 +522,22 @@ def do_mkfs(part: str, parttype: str, dryrun: bool = False) -> str:
 
     return uuid
 
+
 def do_btrfs_subvols(part: str, subvolumes: list, dryrun: bool = False):
     mountpoint = "/btrfs"
     logging.info(f"Mounting {part} at {mountpoint}")
     os.makedirs(mountpoint, exist_ok=True)
-    subprocess_run_wrapper(cmd=f"mount -o rw,subvolid=5,compress=zstd:1,discard=async {shlex.quote(part)} {shlex.quote(mountpoint)}", dryrun=dryrun)
+    subprocess_run_wrapper(
+        cmd=f"mount -o rw,subvolid=5,compress=zstd:1,discard=async {shlex.quote(part)} {shlex.quote(mountpoint)}",
+        dryrun=dryrun,
+    )
     try:
         for sub in subvolumes:
             path = os.path.join(mountpoint, sub)
             logging.info(f"Creating btrfs subvolume {path}")
-            subprocess_run_wrapper(cmd=f"btrfs subvolume create {shlex.quote(path)}", dryrun=dryrun)
+            subprocess_run_wrapper(
+                cmd=f"btrfs subvolume create {shlex.quote(path)}", dryrun=dryrun
+            )
     finally:
         logging.info(f"Unmounting {mountpoint}")
         subprocess_run_wrapper(cmd=f"umount {shlex.quote(mountpoint)}", dryrun=dryrun)
@@ -299,61 +545,135 @@ def do_btrfs_subvols(part: str, subvolumes: list, dryrun: bool = False):
 
 
 def do_write_disk_var_sh(esppart: str, bootpart: str, rootpart: str, bootdev: str):
-    disk_var_sh = os.path.join(os.environ['LOGDIR'], "disk_var.sh")
+    disk_var_sh = os.path.join(os.environ["LOGDIR"], "disk_var.sh")
     with open(disk_var_sh, "w") as f:
         f.write(f'ESP_DEVICE="{esppart}"\n')
         f.write(f'BOOT_PARTITION="{bootpart}"\n')
         f.write(f'ROOT_PARTITION="{rootpart}"\n')
-        f.write(f'SWAPLIST=""\n')
+        f.write('SWAPLIST=""\n')
         f.write(f'BOOT_DEVICE="{bootdev}"\n')
         f.write(f'PHYSICAL_BOOT_DEVICES="{bootdev}"\n')
 
+
 def do_write_crypttab(crypt_uuids: list):
-    crypttab = os.path.join(os.environ['LOGDIR'], "crypttab")
-    for crypt_uuid in crypt_uuids: 
-        with open(crypttab, "w") as f:
-            f.write(f'luks-{crypt_uuid} UUID={crypt_uuid} none luks,discard\n')
+    crypttab = os.path.join(os.environ["LOGDIR"], "crypttab")
+    with open(crypttab, "w") as f:
+        for crypt_uuid in crypt_uuids:
+            f.write(f"luks-{crypt_uuid} UUID={crypt_uuid} none luks,discard\n")
 
 
 def do_write_fstab(efi_uuid: str, boot_uuid: str, root_uuid: str):
-    fstab = os.path.join(os.environ['LOGDIR'], "fstab")
+    fstab = os.path.join(os.environ["LOGDIR"], "fstab")
     with open(fstab, "w") as f:
-        f.write(f"UUID={root_uuid} /         btrfs   rw,subvol=os,compress=zstd:1,x-systemd.device-timeout=0,discard=async 0 1\n")
-        f.write(f"UUID={boot_uuid} /boot    btrfs   rw,subvol=boot,compress=zstd:1,x-systemd.device-timeout=0,discard=async  0 2\n")
+        f.write(
+            f"UUID={root_uuid} /         btrfs   rw,subvol=os,compress=zstd:1,x-systemd.device-timeout=0,discard=async 0 1\n"
+        )
+        f.write(
+            f"UUID={boot_uuid} /boot    btrfs   rw,subvol=boot,compress=zstd:1,x-systemd.device-timeout=0,discard=async  0 2\n"
+        )
         f.write(f"UUID={efi_uuid} /boot/efi vfat    rw,discard             0 2\n")
 
-def do_setup_storage(diskpath: str, cryptpw: str, dryrun: bool = False):
-    crypt_root_uuid = do_cryptsetup(partition=f"{diskpath}-part3", cryptpw=cryptpw, dryrun=dryrun)
 
-    efi_uuid = do_mkfs(part=f"{diskpath}-part1", parttype="EFI", dryrun=dryrun)
-    boot_uuid = do_mkfs(part=f"{diskpath}-part2", parttype="btrfs", dryrun=dryrun)
-    root_uuid = do_mkfs(part=f"/dev/mapper/luks-{crypt_root_uuid}", parttype="btrfs", dryrun=dryrun)
+def get_uuid_of_existing_fs(part: str, dryrun: bool = False) -> str:
+    # Use blkid to read UUID without touching filesystem
+    cp = subprocess_run_wrapper(
+        cmd=f"blkid -s UUID -o value {shlex.quote(part)}",
+        dryrun=dryrun,
+        shell=True,
+        executable="/bin/bash",
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return (cp.stdout or "").strip()
 
-    do_btrfs_subvols(part=f"{diskpath}-part2", subvolumes=[ 'boot' ], dryrun=dryrun)
-    do_btrfs_subvols(part=f"/dev/mapper/luks-{crypt_root_uuid}", subvolumes=[ 'os' ], dryrun=dryrun)
 
-    do_write_disk_var_sh(esppart=f"{diskpath}-part1", bootpart=f"{diskpath}-part2", rootpart=f"/dev/mapper/luks-{crypt_root_uuid}", bootdev=f"{diskpath}")
+def do_setup_storage(
+    diskpath: str, diskinfo: dict, disklayout: dict, cryptpw: str, dryrun: bool = False
+):
+    esp_number = disklayout["esp"]["number"]
+    boot_number = disklayout["boot"]["number"]
+    root_number = disklayout["root"]["number"]
 
-    do_write_crypttab(crypt_uuids=[ crypt_root_uuid ])
+    crypt_root_uuid = do_cryptsetup(
+        partition=f"{diskpath}-part{root_number}", cryptpw=cryptpw, dryrun=dryrun
+    )
+
+    if disklayout["esp"]["wipe"]:
+        efi_uuid = do_mkfs(
+            part=f"{diskpath}-part{esp_number}", parttype="EFI", dryrun=dryrun
+        )
+    else:
+        efi_uuid = get_uuid_of_existing_fs(
+            part=f"{diskpath}-part{esp_number}", dryrun=dryrun
+        )
+
+    boot_uuid = do_mkfs(
+        part=f"{diskpath}-part{boot_number}", parttype="btrfs", dryrun=dryrun
+    )
+    root_uuid = do_mkfs(
+        part=f"/dev/mapper/luks-{crypt_root_uuid}", parttype="btrfs", dryrun=dryrun
+    )
+
+    do_btrfs_subvols(
+        part=f"{diskpath}-part{boot_number}", subvolumes=["boot"], dryrun=dryrun
+    )
+    do_btrfs_subvols(
+        part=f"/dev/mapper/luks-{crypt_root_uuid}", subvolumes=["os"], dryrun=dryrun
+    )
+
+    do_write_disk_var_sh(
+        esppart=f"{diskpath}-part{esp_number}",
+        bootpart=f"{diskpath}-part{boot_number}",
+        rootpart=f"/dev/mapper/luks-{crypt_root_uuid}",
+        bootdev=f"{diskpath}",
+    )
+
+    do_write_crypttab(crypt_uuids=[crypt_root_uuid])
 
     do_write_fstab(efi_uuid=efi_uuid, boot_uuid=boot_uuid, root_uuid=root_uuid)
 
 
 def main():
     dryrun = False
-    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
     ks = os.path.isdir("/usr/share/anaconda")
     fai = os.path.isdir("/var/lib/fai")
     if ks and fai:
-        logging.error(f"Found both Anaconda dir and FAI dir - can only be either or")
+        logging.error("Found both Anaconda dir and FAI dir - can only be either or")
         sys.exit(1)
 
+    disklayoutid = os.environ["DISKLAYOUTID"]
     diskpath = os.environ["DISKPATH"]
-    rootsizemib = int(os.environ["ROOTSIZEMIB"])
+    rootsizemib = int(os.environ.get("ROOTSIZEMIB", 0))
     cryptpw = shlex.quote(str(os.environ.get("CRYPTPW", False)))
-    root_end_mib = 2048 + 2048 + rootsizemib # efi size + boot size + rootsizemib
-    wipeparts = [ 1, 2, 3 ]
+
+    rootsizemibmin = int(10240)
+
+    if rootsizemib < rootsizemibmin:
+        logging.error(
+            f"rootsizemib {rootsizemib} < rootsizemibmin {rootsizemibmin} - exiting"
+        )
+        sys.exit(1)
+
+    disklayouts = {
+        "linuxonly": {
+            "esp": {"number": 1, "wipe": True, "sizemib": 2047},
+            "boot": {"number": 2, "wipe": True, "sizemib": 2048},
+            "root": {"number": 3, "wipe": True, "sizemib": rootsizemib},
+        },
+        "windows-and-linux": {
+            "esp": {"number": 1, "wipe": False, "sizemib": 2047},
+            "boot": {"number": 5, "wipe": True, "sizemib": 2048},
+            "root": {"number": 6, "wipe": True, "sizemib": rootsizemib},
+        },
+    }
+
+    disklayout = disklayouts.get(disklayoutid, False)
+    if not disklayout:
+        logging.error(f"Couldn't get disklayout {disklayoutid}")
+        sys.exit(1)
 
     diskinfo = get_diskinfo(diskpath=diskpath, dryrun=dryrun)
 
@@ -361,25 +681,122 @@ def main():
         logging.error(f"Couldn't get diskinfo {diskpath}")
         sys.exit(1)
 
-    should_partition = check_should_partition(diskpath=diskpath, diskinfo=diskinfo)
+    match disklayoutid:
+        case "linuxonly":
+            should_partition = check_should_partition(
+                diskpath=diskpath, diskinfo=diskinfo
+            )
 
-    if diskinfo.get("children"):
-        wiped = do_wipeparts(diskpath=diskpath, diskinfo=diskinfo, wipeparts=wipeparts, dryrun=dryrun)
+            if should_partition:
+                do_partition(diskpath=diskpath, disklayout=disklayout, dryrun=dryrun)
+            else:
+                logging.info("Partitioning skipped.")
 
-    if should_partition:
-        do_partition(diskpath=diskpath, root_end_mib=root_end_mib, dryrun=dryrun)
-    else:
-        logging.info(f"Partitioning skipped.")
-    
-    if ks:
-        write_ks_snippets(diskpath=diskpath)
-    elif fai:
-        if not cryptpw:
-            logging.error(f"cryptpw is not set, usually it must be set in hostconf of faibuilder which ensures an env var CRYPTPW is set in fai")
+        case "windows-and-linux":
+            # FIXME: check if partition 1-4 exist, if not: exit with error
+
+            parts_by_no: dict[int, dict] = {}
+            diskparts = diskinfo.get("children")
+            for p in diskparts:
+                partnumber = p.get("partno") or p.get("partn")
+                if partnumber:
+                    parts_by_no[int(partnumber)] = p
+
+            missing = [n for n in (1, 2, 3, 4) if n not in parts_by_no]
+            if missing:
+                logging.error(
+                    f"{diskpath}: expected Windows partitions 1-4 to exist, missing: {missing}"
+                )
+                sys.exit(1)
+
+            # FIXME: check if partition 1 is a valid EFI partition, if not: exit with error
+            ESP_GPT_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+            p1 = parts_by_no[1]
+            p1_fstype = (p1.get("fstype") or "").lower()
+            p1_parttype = (p1.get("parttype") or "").lower()
+            p1_typename = (p1.get("parttypename") or "").lower()
+            p1_flags = (p1.get("partflags") or "").lower()
+
+            looks_like_esp = (
+                (p1_parttype == ESP_GPT_GUID)
+                or ("efi system" in p1_typename)
+                or ("esp" in p1_flags)
+                or ("boot" in p1_flags)
+                or (p1_fstype in ("vfat", "fat", "fat32"))
+            )
+            if not looks_like_esp:
+                logging.error(
+                    f"{diskpath}: partition 1 does not look like an EFI System Partition. "
+                    f"fstype={p1.get('fstype')} parttype={p1.get('parttype')} "
+                    f"typename={p1.get('parttypename')} flags={p1.get('partflags')}"
+                )
+                sys.exit(1)
+
+            # FIXME: check if partitions other than 1-4 exist,
+            extras = sorted(n for n in parts_by_no.keys() if n not in (1, 2, 3, 4))
+            # - if yes: do not partition at all, but check if 5 and 6 exist, if not: exit with error
+            if extras:
+                if 5 not in parts_by_no or 6 not in parts_by_no:
+                    logging.error(
+                        f"{diskpath}: found extra partitions beyond 1-4 ({extras}) "
+                        f"but required Linux partitions 5 and 6 are not both present."
+                    )
+                    sys.exit(1)
+                logging.info(
+                    f"{diskpath}: partitions beyond 1-4 already exist ({extras}); will not create new partitions."
+                )
+
+            # - if no:  create part 5 (boot) and 6 (root) at beginning of free space which must begin directly after part4 and no other parts until the end of disk
+            else:
+                required_mib = int(disklayout["boot"]["sizemib"]) + int(
+                    disklayout["root"]["sizemib"]
+                )
+                start_mib, avail_mib = get_start_mib_after_partnumber(
+                    diskpath=diskpath,
+                    required_mib=required_mib,
+                    partnumber=4,
+                    dryrun=dryrun,
+                )
+                do_add_partitions(
+                    diskpath=diskpath,
+                    disklayout=disklayout,
+                    start_mib=start_mib,
+                    dryrun=dryrun,
+                )
+
+        case _:
+            logging.error(f"Unknown disklayoutid {disklayoutid} - exiting")
             sys.exit(1)
 
-        do_setup_storage(diskpath, cryptpw=cryptpw, dryrun=dryrun)
-        subprocess_run_wrapper(cmd=f"skiptask partition", dryrun=dryrun, shell=True, executable="/bin/bash", check=True)
+    if diskinfo.get("children"):
+        wiped = do_wipeparts(
+            diskpath=diskpath, diskinfo=diskinfo, disklayout=disklayout, dryrun=dryrun
+        )
+
+    if ks:
+        write_ks_snippets(diskpath=diskpath, disklayout=disklayout)
+    elif fai:
+        if not cryptpw:
+            logging.error(
+                "cryptpw is not set, usually it must be set in hostconf of faibuilder which ensures an env var CRYPTPW is set in fai"
+            )
+            sys.exit(1)
+
+        do_setup_storage(
+            diskpath,
+            diskinfo=diskinfo,
+            disklayout=disklayout,
+            cryptpw=cryptpw,
+            dryrun=dryrun,
+        )
+        subprocess_run_wrapper(
+            cmd="skiptask partition",
+            dryrun=dryrun,
+            shell=True,
+            executable="/bin/bash",
+            check=True,
+        )
+
 
 if __name__ == "__main__":
     main()
