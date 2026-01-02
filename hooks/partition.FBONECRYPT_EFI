@@ -331,7 +331,7 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
         check=True,
     )
 
-    logging.info("Current partition layout (free space):\n{r.stdout}")
+    logging.info(f"Current partition layout (free space):\n{r.stdout}")
 
     if dryrun or r is None:
         return []
@@ -363,7 +363,7 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
             if "." in fields[1].strip():
                 continue
             logging.info(
-                "Adding partition entry kind: free, start: {start}, end: {end}"
+                f"Adding partition entry kind: free, start: {start}, end: {end}"
             )
             entries.append({"kind": "free", "start": start, "end": end})
             continue
@@ -378,11 +378,11 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
         except Exception:
             logging.error(f"cannot parse partition number from line: {line!r}")
             sys.exit(1)
-        logging.info("Adding partition entry kind: part, start: {start}, end: {end}")
+        logging.info(f"Adding partition entry kind: part, start: {start}, end: {end}")
         entries.append({"kind": "part", "n": n, "start": start, "end": end})
 
     # Entries are already in physical order because parted prints them that way.
-    logging.info("Partition entries: {entries}")
+    logging.info(f"Partition entries: {entries}")
     return entries
 
 
@@ -702,12 +702,12 @@ def main():
         sys.exit(1)
 
     disklayouts = {
-        "linuxonly": {
+        "singleos": {
             "esp": {"number": 1, "wipe": True, "sizemib": 2047},
             "boot": {"number": 2, "wipe": True, "sizemib": 2048},
             "root": {"number": 3, "wipe": True, "sizemib": rootsizemib},
         },
-        "windows-and-linux": {
+        "multios": {
             "esp": {"number": 1, "wipe": False, "sizemib": 2047},
             "boot": {"number": 5, "wipe": True, "sizemib": 2048},
             "root": {"number": 6, "wipe": True, "sizemib": rootsizemib},
@@ -726,7 +726,7 @@ def main():
         sys.exit(1)
 
     match disklayoutid:
-        case "linuxonly":
+        case "singleos":
             should_partition = check_should_partition(
                 diskpath=diskpath, diskinfo=diskinfo
             )
@@ -736,7 +736,7 @@ def main():
             else:
                 logging.info("Partitioning skipped.")
 
-        case "windows-and-linux":
+        case "multios":
             # FIXME: check if partition 1-4 exist, if not: exit with error
 
             parts_by_no: dict[int, dict] = {}
