@@ -210,9 +210,9 @@ def do_partition(diskpath: str, disklayout: dict, dryrun: bool = False):
     esp_mib = disklayout["esp"]["sizemib"]
     boot_mib = disklayout["boot"]["sizemib"]
     root_mib = disklayout["root"]["sizemib"]
-    esp_end_mib = start_mib + esp_mib  # usually 2048
-    boot_end_mib = esp_end_mib + boot_mib  # usually 4096
-    root_end_mib = boot_end_mib + root_mib  # usually 4096  + rootsizemib
+    esp_end_mib = start_mib + esp_mib
+    boot_end_mib = esp_end_mib + boot_mib
+    root_end_mib = boot_end_mib + root_mib
 
     logging.info(
         f"ESP: number: {esp_number}, size(MiB): {esp_mib}, start(MiB): {start_mib}, end(MiB): {esp_end_mib}"
@@ -690,8 +690,15 @@ def main():
 
     disklayoutid = os.environ["DISKLAYOUTID"]
     diskpath = os.environ["DISKPATH"]
+    startpartition = int(os.environ["STARTPARTITION"])
     rootsizemib = int(os.environ.get("ROOTSIZEMIB", 0))
     cryptpw = shlex.quote(str(os.environ.get("CRYPTPW", False)))
+
+    logging.info(f"disklayoutid: {shlex.quote(str(disklayoutid))}")
+    logging.info(f"diskpath: {shlex.quote(str(diskpath))}")
+    logging.info(f"startpartition: {int(startpartition)}")
+    logging.info(f"rootsizemib: {int(rootsizemib)}")
+    logging.info("cryptpw: hidden")
 
     rootsizemibmin = int(10240)
 
@@ -709,12 +716,19 @@ def main():
         },
         "multios": {
             "esp": {"number": 1, "wipe": False, "sizemib": 2047},
-            "boot": {"number": 5, "wipe": True, "sizemib": 2048},
-            "root": {"number": 6, "wipe": True, "sizemib": rootsizemib},
+            "boot": {"number": int(startpartition), "wipe": True, "sizemib": 2048},
+            "root": {
+                "number": int(startpartition) + 1,
+                "wipe": True,
+                "sizemib": rootsizemib,
+            },
         },
     }
 
+    logging.info(f"disklayouts:\n{disklayouts}")
+
     disklayout = disklayouts.get(disklayoutid, False)
+    logging.info(f"disklayout:\n{disklayout}")
     if not disklayout:
         logging.error(f"Couldn't get disklayout {disklayoutid}")
         sys.exit(1)
@@ -737,29 +751,47 @@ def main():
                 logging.info("Partitioning skipped.")
 
         case "multios":
-            # FIXME: check if partition 1-4 exist, if not: exit with error
+            if disklayout["boot"]["number"] < 1:
+                logging.error(
+                    f"startpartition/number of boot partition {disklayout['boot']['number']} not set correctly - exiting"
+                )
+                sys.exit(1)
+
+            # check if partition all partition exist, that have a number smaller that boot partition number (example: 1,2,3,4 if boot partition number is 5) if not: exit with error
 
             parts_by_no: dict[int, dict] = {}
+
             diskparts = diskinfo.get("children")
             for p in diskparts:
                 partnumber = p.get("partno") or p.get("partn")
                 if partnumber:
                     parts_by_no[int(partnumber)] = p
+            logging.info(f"parts_by_no:\n{parts_by_no}")
 
-            missing = [n for n in (1, 2, 3, 4) if n not in parts_by_no]
+            missing = [
+                n
+                for n in range(1, disklayout["boot"]["number"])
+                if n not in parts_by_no
+            ]
+            logging.info(f"missing: {missing}")
             if missing:
                 logging.error(
-                    f"{diskpath}: expected Windows partitions 1-4 to exist, missing: {missing}"
+                    f"{diskpath}: expected partitions 1-{disklayout['boot']['number'] - 1} to exist, missing: {missing}"
                 )
                 sys.exit(1)
 
-            # FIXME: check if partition 1 is a valid EFI partition, if not: exit with error
+            # check if partition 1 is a valid EFI partition, if not: exit with error
             ESP_GPT_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
             p1 = parts_by_no[1]
             p1_fstype = (p1.get("fstype") or "").lower()
             p1_parttype = (p1.get("parttype") or "").lower()
             p1_typename = (p1.get("parttypename") or "").lower()
             p1_flags = (p1.get("partflags") or "").lower()
+
+            logging.info(f"p1_fstype: {p1_fstype}")
+            logging.info(f"p1_parttype: {p1_parttype}")
+            logging.info(f"p1_typename: {p1_typename}")
+            logging.info(f"p1_flags: {p1_flags}")
 
             looks_like_esp = (
                 (p1_parttype == ESP_GPT_GUID)
@@ -775,32 +807,44 @@ def main():
                     f"typename={p1.get('parttypename')} flags={p1.get('partflags')}"
                 )
                 sys.exit(1)
+            logging.info("p1 looks like a EFI partition - continuing")
 
-            # FIXME: check if partitions other than 1-4 exist,
-            extras = sorted(n for n in parts_by_no.keys() if n not in (1, 2, 3, 4))
-            # - if yes: do not partition at all, but check if 5 and 6 exist, if not: exit with error
+            # check if partitions other than larger or equal than boot partition number exist,
+            extras = sorted(
+                n
+                for n in parts_by_no.keys()
+                if n not in range(1, disklayout["boot"]["number"])
+            )
+            logging.info(f"extras: {extras}")
+            # - if yes: do not partition at all, but check if boot partition number  and root partition number exist, if not: exit with error
             if extras:
-                if 5 not in parts_by_no or 6 not in parts_by_no:
+                if (
+                    disklayout["boot"]["number"] not in parts_by_no
+                    or disklayout["root"]["number"] not in parts_by_no
+                ):
                     logging.error(
-                        f"{diskpath}: found extra partitions beyond 1-4 ({extras}) "
-                        f"but required Linux partitions 5 and 6 are not both present."
+                        f"{diskpath}: found extra partitions beyond 1-{disklayout['boot']['number'] - 1} ({extras}) "
+                        f"but required Linux partitions for boot number {disklayout['boot']['number']} and for root number {disklayout['root']['number']} are not both present."
                     )
                     sys.exit(1)
                 logging.info(
-                    f"{diskpath}: partitions beyond 1-4 already exist ({extras}); will not create new partitions."
+                    f"{diskpath}: partitions beyond 1-{disklayout['boot']['number'] - 1} already exist ({extras}); will not create new partitions."
                 )
 
-            # - if no:  create part 5 (boot) and 6 (root) at beginning of free space which must begin directly after part4 and no other parts until the end of disk
+            # - if no:  create boot and root part at beginning of free space which must begin directly after last part before boot and no other parts until the end of disk
             else:
                 required_mib = int(disklayout["boot"]["sizemib"]) + int(
                     disklayout["root"]["sizemib"]
                 )
+                logging.info(f"required_mib: {required_mib}")
                 start_mib, avail_mib = get_start_mib_after_partnumber(
                     diskpath=diskpath,
                     required_mib=required_mib,
-                    partnumber=4,
+                    partnumber=disklayout["boot"]["number"] - 1,
                     dryrun=dryrun,
                 )
+                logging.info(f"start_mib,: {start_mib,}")
+                logging.info(f"avail_mib,: {avail_mib,}")
                 do_add_partitions(
                     diskpath=diskpath,
                     disklayout=disklayout,
