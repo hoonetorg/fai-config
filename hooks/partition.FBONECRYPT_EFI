@@ -382,7 +382,7 @@ def read_parted_entries(diskpath: str, dryrun: bool = False) -> list[dict]:
         entries.append({"kind": "part", "n": n, "start": start, "end": end})
 
     # Entries are already in physical order because parted prints them that way.
-    logging.info(f"Partition entries: {entries}")
+    logging.info(f"Partition entries: {json.dumps(entries, indent=2)}")
     return entries
 
 
@@ -843,8 +843,8 @@ def main():
                     partnumber=disklayout["boot"]["number"] - 1,
                     dryrun=dryrun,
                 )
-                logging.info(f"start_mib,: {start_mib,}")
-                logging.info(f"avail_mib,: {avail_mib,}")
+                logging.info(f"start_mib: {start_mib}")
+                logging.info(f"avail_mib: {avail_mib}")
                 do_add_partitions(
                     diskpath=diskpath,
                     disklayout=disklayout,
