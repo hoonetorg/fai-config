@@ -151,7 +151,7 @@ def check_should_partition(diskpath: str, diskinfo: dict) -> bool:
             # This is the only condition where we do partitioning - no partition table and no FS
             should_partition = True
 
-    # Furhter check for existing partitions - should only be True when disk has partition table
+    # Further check for existing partitions - should only be True when disk has partition table
     if diskinfo.get("children"):
         logging.info(
             f"{diskpath} has probably existing partitions; skipping partitioning"
@@ -178,7 +178,7 @@ def do_wipeparts(
         part["number"] for part in disklayout.values() if part.get("wipe")
     )
 
-    diskid_link = diskinfo.get("id-link")
+    # diskid_link = diskinfo.get("id-link")
     diskparts = diskinfo.get("children")
     diskpttype = diskinfo.get("pttype")
     if diskparts:
@@ -194,7 +194,7 @@ def do_wipeparts(
                         cmd=f"wipefs --force --all {shlex.quote(partpath)}",
                         dryrun=dryrun,
                     )
-            logging.info(f"signatures wiped on parts {wipeparts} wiped.")
+            logging.info(f"signatures wiped on parts {wipeparts}.")
 
         subprocess_run_wrapper(cmd=f"partprobe {shlex.quote(diskpath)}", dryrun=dryrun)
         do_device_settle(dryrun=dryrun)
@@ -472,9 +472,9 @@ def get_start_mib_after_partnumber(
     return (start_mib, avail_mib)
 
 
-def do_cryptsetup(partition: str, cryptpw: str, dryrun: bool = False) -> str:
+def do_cryptsetup(partition: str, cryptpw: str, dryrun: bool = False) -> str | None:
 
-    password = (cryptpw + "\n").encode()
+    password = (cryptpw + "\n").encode("utf-8")
     subprocess_run_wrapper(
         cmd=(
             "cryptsetup luksFormat "
@@ -692,7 +692,7 @@ def main():
     diskpath = os.environ["DISKPATH"]
     startpartition = int(os.environ["STARTPARTITION"])
     rootsizemib = int(os.environ.get("ROOTSIZEMIB", 0))
-    cryptpw = shlex.quote(str(os.environ.get("CRYPTPW", False)))
+    cryptpw = os.environ.get("CRYPTPW")
 
     logging.info(f"disklayoutid: {shlex.quote(str(disklayoutid))}")
     logging.info(f"diskpath: {shlex.quote(str(diskpath))}")
@@ -725,10 +725,10 @@ def main():
         },
     }
 
-    logging.info(f"disklayouts:\n{disklayouts}")
+    logging.info(f"disklayouts:\n{json.dumps(disklayouts, indent=2)}")
 
     disklayout = disklayouts.get(disklayoutid, False)
-    logging.info(f"disklayout:\n{disklayout}")
+    logging.info(f"disklayout:\n{json.dumps(disklayout, indent=2)}")
     if not disklayout:
         logging.error(f"Couldn't get disklayout {disklayoutid}")
         sys.exit(1)
@@ -766,7 +766,7 @@ def main():
                 partnumber = p.get("partno") or p.get("partn")
                 if partnumber:
                     parts_by_no[int(partnumber)] = p
-            logging.info(f"parts_by_no:\n{parts_by_no}")
+            logging.info(f"parts_by_no:\n{json.dumps(parts_by_no, indent=2)}")
 
             missing = [
                 n
@@ -857,14 +857,15 @@ def main():
             sys.exit(1)
 
     if diskinfo.get("children"):
-        wiped = do_wipeparts(
+        # wiped = do_wipeparts(
+        do_wipeparts(
             diskpath=diskpath, diskinfo=diskinfo, disklayout=disklayout, dryrun=dryrun
         )
 
     if ks:
         write_ks_snippets(diskpath=diskpath, disklayout=disklayout)
     elif fai:
-        if not cryptpw:
+        if not isinstance(cryptpw, str) or cryptpw == "":
             logging.error(
                 "cryptpw is not set, usually it must be set in hostconf of faibuilder which ensures an env var CRYPTPW is set in fai"
             )
