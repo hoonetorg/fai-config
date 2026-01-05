@@ -29,7 +29,9 @@ def subprocess_run_wrapper(
     return subprocess.run(wcmd, **kwargs)
 
 
-def write_ks_snippets(diskpath: str, disklayout: dict):
+def write_ks_snippets(
+    diskpath: str, disklayout: dict, btrfsbootlabel: str, btrfsrootlabel: str
+):
     esp_number = disklayout["esp"]["number"]
     boot_number = disklayout["boot"]["number"]
     root_number = disklayout["root"]["number"]
@@ -39,7 +41,10 @@ def write_ks_snippets(diskpath: str, disklayout: dict):
 
     # Persist the disk identifier without newline
     with open("/tmp/disk-id", "w") as f:
-        f.write(diskpath)
+        f.write(str(diskpath))
+
+    with open("/tmp/boot-number", "w") as f:
+        f.write(str(boot_number))
 
     # Generate partitions.ks Kickstart fragment
     partitions_ks = f"""
@@ -48,12 +53,12 @@ def write_ks_snippets(diskpath: str, disklayout: dict):
     part btrfs.{boot_number} --fstype="btrfs" --onpart={diskpath}-part{boot_number}
     part btrfs.{root_number} --fstype="btrfs" --onpart={diskpath}-part{root_number} --encrypted --luks-version=luks2
     
-    btrfs /boot --label=fedora_boot --data=single btrfs.{boot_number}
-    btrfs none --label=fedora_fedora --data=single btrfs.{root_number} 
+    btrfs none --label={btrfsbootlabel} --data=single btrfs.{boot_number}
+    btrfs none --label={btrfsrootlabel} --data=single btrfs.{root_number} 
     
-    btrfs / --subvol --name=root fedora_fedora
-    btrfs /var --subvol --name=var fedora_fedora
-    btrfs /home --subvol --name=home fedora_fedora
+    btrfs / --subvol --name=root {btrfsrootlabel}
+    btrfs /boot --subvol --name=test {btrfsbootlabel}
+    btrfs /home --subvol --name=home {btrfsrootlabel}
     """
     with open("/tmp/partitions.ks", "w") as f:
         f.write(partitions_ks)
@@ -694,6 +699,9 @@ def main():
     rootsizemib = int(os.environ.get("ROOTSIZEMIB", 0))
     cryptpw = os.environ.get("CRYPTPW")
 
+    btrfsrootlabel = "almalinux"
+    btrfsbootlabel = "almalinuxboot"
+
     logging.info(f"disklayoutid: {shlex.quote(str(disklayoutid))}")
     logging.info(f"diskpath: {shlex.quote(str(diskpath))}")
     logging.info(f"startpartition: {int(startpartition)}")
@@ -863,7 +871,12 @@ def main():
         )
 
     if ks:
-        write_ks_snippets(diskpath=diskpath, disklayout=disklayout)
+        write_ks_snippets(
+            diskpath=diskpath,
+            disklayout=disklayout,
+            btrfsbootlabel=btrfsbootlabel,
+            btrfsrootlabel=btrfsrootlabel,
+        )
     elif fai:
         if not isinstance(cryptpw, str) or cryptpw == "":
             logging.error(
