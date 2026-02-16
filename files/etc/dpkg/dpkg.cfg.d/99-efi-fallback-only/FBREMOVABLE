@@ -1,0 +1,5 @@
+# Ensure GRUB maintains EFI/BOOT and does not write NVRAM entries
+pre-invoke=/usr/local/bin/efi-grub-debconf-enforce || true
+
+# Enforce no vendor dir policy after dpkg actions
+post-invoke=/usr/local/bin/efi-rm-debian-dir || true

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+LOG=/var/log/efi-rm-debian-dir.log
+exec >>"$LOG" 2>&1
+
+echo "===== $(date -Is) efi-rm-debian-dir start ====="
+echo "uid=$(id -u) user=$(id -un)"
+echo "argv: $0 $*"
+
+# Must be root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ERROR: must run as root"
+  exit 1
+fi
+
+set -x
+
+ESP=/boot/efi
+VENDORDIR="$ESP/EFI/debian"
+
+# Only act if ESP is mounted
+if ! mountpoint -q "$ESP"; then
+  echo "ESP not mounted → exit"
+  set +x
+  echo "===== $(date -Is) efi-rm-debian-dir end ====="
+  exit 0
+fi
+
+if [ -d "$VENDORDIR" ]; then
+  echo "Removing $VENDORDIR"
+  rm -rf -- "$VENDORDIR"
+else
+  echo "$VENDORDIR not present"
+fi
+
+rc=$?
+
+set +x
+echo "rm rc=$rc"
+echo "===== $(date -Is) efi-rm-debian-dir end ====="
+
+exit $rc
+

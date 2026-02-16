@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+LOG=/var/log/efi-grub-debconf-pre.log
+
+# open log: append stdout+stderr
+exec >>"$LOG" 2>&1
+
+echo "===== $(date -Is) efi-grub-debconf-pre start ====="
+echo "uid=$(id -u) euid=$(id -u) user=$(id -un)"
+echo "argv: $0 $*"
+
+# Must be root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ERROR: must run as root"
+  exit 1
+fi
+
+set -x
+
+debconf-set-selections -u <<'SEED'
+grub-efi-amd64 grub2/force_efi_extra_removable boolean true
+grub-efi-amd64 grub2/update_nvram boolean false
+SEED
+
+rc=$?
+
+set +x
+echo "debconf-set-selections rc=$rc"
+echo "===== $(date -Is) efi-grub-debconf-pre end ====="
+
+exit $rc
+

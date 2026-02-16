@@ -37,11 +37,26 @@ else
 fi
 
 if ifclass FBREMOVABLE ; then
+    # ensure booting from thunderbolt disks works
+    # with security=user
+    # by not resetting the thunderbolt controller
+    fcopy -m root,root,0644 -v /etc/default/grub.d/90_thunderbolt.cfg
+
+    # ensure /boot/efi/EFI/debian not being created or 
+    # being removed if created on removable grub install
+    # as well as no efi boot entry being created
+    # now and 
+    # on every apt, dpkg, dpkg-reconfigure action
+    # (only required on pkg grub-efi-amd64, 
+    # but hard to filter)
+    fcopy -m root,root,0644 -v /etc/dpkg/dpkg.cfg.d/99-efi-fallback-only
+    fcopy -m root,root,0755 -v /usr/local/bin/efi-grub-debconf-enforce
+    fcopy -m root,root,0755 -v /usr/local/bin/efi-rm-debian-dir
     opts="${opts} --removable"
 fi
 
 if ifclass FBDESKTOP ; then
-    fcopy -v /etc/default/grub.d/90_splash.cfg
+    fcopy -m root,root,0644 -v /etc/default/grub.d/90_splash.cfg
     $ROOTCMD plymouth-set-default-theme bgrt -R
 fi
 
