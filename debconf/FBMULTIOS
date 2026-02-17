@@ -1,0 +1,1 @@
+grub-efi-amd64 grub2/enable_os_prober boolean true
