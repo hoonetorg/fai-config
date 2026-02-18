@@ -52,6 +52,11 @@ if ifclass FBREMOVABLE ; then
     fcopy -m root,root,0644 -v /etc/dpkg/dpkg.cfg.d/99-efi-fallback-only
     fcopy -m root,root,0755 -v /usr/local/bin/efi-grub-debconf-enforce
     fcopy -m root,root,0755 -v /usr/local/bin/efi-rm-debian-dir
+    # we must disable suspend/hibernate ...
+    # mostly filesystems have an error state and become read only 
+    # when Linux wakes up from suspend with root on thunderbolt
+    # especially from thunderbolt version 4 on 
+    fcopy -m root,root,0644 -v /etc/systemd/sleep.conf.d/nosuspend.conf
     opts="${opts} --removable"
 fi
 
@@ -64,6 +69,19 @@ $ROOTCMD grub-install $opts "$GROOT"
 if [ $? -eq 0 ]; then
     echo "Grub installed on $BOOT_DEVICE = $GROOT"
 fi
+
+if ifclass FBREMOVABLE ; then
+    rm -f $target/boot/efi/EFI/BOOT/BOOTX64.CSV $target/boot/efi/EFI/BOOT/shimx64.efi $target/boot/efi/EFI/BOOT/fbx64.efi
+    if ifclass UBUNTU ; then
+        echo "Repairing broken Ubuntu 24.04 Grub removable installation by"
+	echo "copying correct Grub EFI file from"
+	echo "$target/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed"
+	echo "to"
+	echo "$target/boot/efi/EFI/BOOT/grubx64.efi"
+        cp  $target/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed  $target/boot/efi/EFI/BOOT/grubx64.efi
+    fi
+fi
+
 
 $ROOTCMD update-grub
 if [[ $BOOT_DEVICE =~ '/dev/loop' ]]; then

@@ -1,6 +1,42 @@
 #!/bin/sh
 set -eu
 
+
+
+get_efi_distributor() {
+    GRUB_DISTRIBUTOR=
+
+    # Load main config
+    if [ -r /etc/default/grub ]; then
+        . /etc/default/grub >/dev/null 2>&1
+    fi
+
+    # Load drop-ins (lexical order)
+    for f in /etc/default/grub.d/*.cfg; do
+        [ -r "$f" ] || continue
+        . "$f" >/dev/null 2>&1
+    done
+
+    # Derive bootloader_id = lower(first_word(GRUB_DISTRIBUTOR))
+    dist=$GRUB_DISTRIBUTOR
+    dist=${dist%% *}
+
+    # lowercase (POSIX)
+    dist=`printf '%s' "$dist" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
+
+    # fallback
+    [ -n "$dist" ] || dist=grub
+
+    # Debian EFI distributor remap
+    case "$dist" in
+        kubuntu) dist=ubuntu ;;
+        devuan)  dist=debian ;;
+    esac
+
+    printf '%s\n' "$dist"
+}
+
+
 LOG=/var/log/efi-rm-debian-dir.log
 exec >>"$LOG" 2>&1
 
@@ -17,7 +53,9 @@ fi
 set -x
 
 ESP=/boot/efi
-VENDORDIR="$ESP/EFI/debian"
+BOOTDIR="$ESP/EFI/BOOT"
+BOOTID=`get_efi_distributor`
+VENDORDIR="$ESP/EFI/$BOOTID"
 
 # Only act if ESP is mounted
 if ! mountpoint -q "$ESP"; then
@@ -27,18 +65,23 @@ if ! mountpoint -q "$ESP"; then
   exit 0
 fi
 
+rc=0
+
+echo "Removing BOOTX64.CSV, shimx64.efi, fbx64.efi from $BOOTDIR/"
+rm -f -- "$BOOTDIR/BOOTX64.CSV" "$BOOTDIR/shimx64.efi" "$BOOTDIR/fbx64.efi" || rc=1
+  
 if [ -d "$VENDORDIR" ]; then
+  echo "Copying $VENDORDIR/grub.cfg to $BOOTDIR/"
+  cp -a -- "$VENDORDIR/grub.cfg" "$BOOTDIR/" || rc=1
   echo "Removing $VENDORDIR"
-  rm -rf -- "$VENDORDIR"
+  rm -rf -- "$VENDORDIR" || rc=1
+
 else
   echo "$VENDORDIR not present"
 fi
-
-rc=$?
 
 set +x
 echo "rm rc=$rc"
 echo "===== $(date -Is) efi-rm-debian-dir end ====="
 
 exit $rc
-
