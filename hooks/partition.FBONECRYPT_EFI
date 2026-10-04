@@ -1,4 +1,5 @@
 #!/usr/bin/env -S python3 -u
+
 import logging
 
 import os
@@ -34,7 +35,9 @@ def write_ks_snippets(
 ):
     esp_number = disklayout["esp"]["number"]
     boot_number = disklayout["boot"]["number"]
+    bls_number = disklayout["bls"]["number"]
     root_number = disklayout["root"]["number"]
+    swap_number = disklayout["swap"]["number"]
 
     efi_fstype_opt = '--fstype="efi"' if disklayout["esp"]["wipe"] else "              "
     efi_noformat_opt = "--noformat" if not disklayout["esp"]["wipe"] else ""
@@ -46,16 +49,20 @@ def write_ks_snippets(
     with open("/tmp/boot-number", "w") as f:
         f.write(str(boot_number))
 
+    with open("/tmp/bls-number", "w") as f:
+        f.write(str(bls_number))
+
     # Generate partitions.ks Kickstart fragment
     partitions_ks = f"""
     ignoredisk --only-use={diskpath}
     part /boot/efi {efi_fstype_opt} --onpart={diskpath}-part{esp_number} {efi_noformat_opt} --fsoptions="umask=0077,shortname=winnt"
     part btrfs.{boot_number} --fstype="btrfs" --onpart={diskpath}-part{boot_number}
     part btrfs.{root_number} --fstype="btrfs" --onpart={diskpath}-part{root_number} --encrypted --luks-version=luks2
-    
+    part swap                --fstype="swap"  --onpart={diskpath}-part{swap_number} --encrypted --luks-version=luks2
+
     btrfs none --label={btrfsbootlabel} --data=single btrfs.{boot_number}
-    btrfs none --label={btrfsrootlabel} --data=single btrfs.{root_number} 
-    
+    btrfs none --label={btrfsrootlabel} --data=single btrfs.{root_number}
+
     btrfs / --subvol --name=root {btrfsrootlabel}
     btrfs /boot --subvol --name=boot {btrfsbootlabel}
     btrfs /home --subvol --name=home {btrfsrootlabel}
@@ -119,7 +126,38 @@ def get_diskinfo(diskpath: str, dryrun: bool = False) -> Any:
     return blockdevices[0]
 
 
-def check_should_partition(diskpath: str, diskinfo: dict) -> bool:
+def get_signatures(device: str, dryrun: bool = False) -> list:
+    # wipefs lists every signature (filesystems, LUKS, RAID/ZFS members, swap, partition tables incl. the
+    # GPT backup); lsblk/blkid report nothing when a device carries several filesystems at once
+    result = subprocess_run_wrapper(
+        cmd=f"wipefs --no-act --json {shlex.quote(device)}",
+        dryrun=dryrun,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    if dryrun or result is None or not result.stdout.strip():
+        return []
+    signatures = json.loads(result.stdout).get("signatures", [])
+    logging.info(f"signatures on {device}: {[s.get('type') for s in signatures]}")
+    return signatures
+
+
+def check_existing_layout(diskpath: str, diskinfo: dict, disklayout: dict) -> bool:
+    # reinstall: all partitions of this OS (ESP, boot, root, swap) exist; other partitions before or after
+    # them are allowed and stay untouched (do_wipeparts only wipes this OS's partitions)
+    if diskinfo.get("pttype") != "gpt":
+        return False
+    existing = {int(p.get("partn") or p.get("partno") or 0) for p in diskinfo.get("children") or []}
+    missing = sorted(
+        part["number"] for name, part in disklayout.items() if name != "bls" and part["number"] not in existing
+    )
+    logging.info(f"{diskpath}: existing partitions {sorted(existing)}, missing for this OS: {missing}")
+    return not missing
+
+
+def check_should_partition(diskpath: str, diskinfo: dict, disklayout: dict, dryrun: bool = False) -> bool:
 
     # Check if disk
     disktype = diskinfo.get("type")
@@ -131,39 +169,22 @@ def check_should_partition(diskpath: str, diskinfo: dict) -> bool:
 
     should_partition = False
 
-    # Check for existing partition table
-    diskpttype = diskinfo.get("pttype")
-    if diskpttype:
-        logging.info(
-            f"{diskpath} has existing partition table type '{diskpttype}'; skipping partitioning"
-        )
+    # partitioned only when the disk is completely empty: no partition table, no partitions, no signature
+    signatures = get_signatures(diskpath, dryrun=dryrun)
+    if not diskinfo.get("pttype") and not diskinfo.get("children") and not signatures:
+        logging.info(f"{diskpath} is empty - partitioning")
+        should_partition = True
+    # reinstall: this OS's partitions are kept, only their signatures are wiped (do_wipeparts)
+    elif check_existing_layout(diskpath, diskinfo, disklayout):
+        logging.info(f"{diskpath} already has the partitions of this OS; skipping partitioning (reinstall)")
         should_partition = False
     else:
-        # No partition table
-        logging.info(
-            f"{diskpath} has no partition table, partition table type is '{diskpttype}'."
+        logging.error(
+            f"{diskpath} contains data ({sorted(set(s.get('type') for s in signatures))}) but not all "
+            f"partitions of this OS - nothing changed; if it is obsolete, remove it first "
+            f"(wipefs -a for every old partition, then for the disk)"
         )
-
-        # Further check for a filesystem directly on the disk
-        disk_fstype = diskinfo.get("fstype")
-        if disk_fstype:
-            logging.info(
-                f"{diskpath} has existing filesystem '{disk_fstype}'; skipping partitioning"
-            )
-            should_partition = False
-        else:
-            logging.info(f"No filesystem detected on {diskpath}")
-            # This is the only condition where we do partitioning - no partition table and no FS
-            should_partition = True
-
-    # Further check for existing partitions - should only be True when disk has partition table
-    if diskinfo.get("children"):
-        logging.info(
-            f"{diskpath} has probably existing partitions; skipping partitioning"
-        )
-        should_partition = False
-    else:
-        logging.info(f"{diskpath} has no partitions.")
+        sys.exit(1)
 
     return should_partition
 
@@ -209,15 +230,19 @@ def do_partition(diskpath: str, disklayout: dict, dryrun: bool = False):
     # Disk is valid and empty – now partition it
     esp_number = disklayout["esp"]["number"]
     boot_number = disklayout["boot"]["number"]
+    bls_number = disklayout["bls"]["number"]
     root_number = disklayout["root"]["number"]
+    swap_number = disklayout["swap"]["number"]
 
     start_mib = 1
     esp_mib = disklayout["esp"]["sizemib"]
     boot_mib = disklayout["boot"]["sizemib"]
     root_mib = disklayout["root"]["sizemib"]
+    swap_mib = disklayout["swap"]["sizemib"]
     esp_end_mib = start_mib + esp_mib
     boot_end_mib = esp_end_mib + boot_mib
     root_end_mib = boot_end_mib + root_mib
+    swap_end_mib = root_end_mib + swap_mib
 
     logging.info(
         f"ESP: number: {esp_number}, size(MiB): {esp_mib}, start(MiB): {start_mib}, end(MiB): {esp_end_mib}"
@@ -226,7 +251,13 @@ def do_partition(diskpath: str, disklayout: dict, dryrun: bool = False):
         f"boot: number: {boot_number}, size(MiB): {boot_mib}, start(MiB): {esp_end_mib}, end(MiB): {boot_end_mib}"
     )
     logging.info(
+        f"bls: number: {bls_number}"
+    )
+    logging.info(
         f"root: number: {root_number}, size(MiB): {root_mib}, start(MiB): {boot_end_mib}, end(MiB): {root_end_mib}"
+    )
+    logging.info(
+        f"swap: number: {swap_number}, size(MiB): {swap_mib}, start(MiB): {root_end_mib}, end(MiB): {swap_end_mib}"
     )
 
     logging.info(f"Partitioning {diskpath}")
@@ -239,12 +270,14 @@ def do_partition(diskpath: str, disklayout: dict, dryrun: bool = False):
             f"mkpart primary {shlex.quote(str(start_mib))} {shlex.quote(str(esp_end_mib))} "
             f"mkpart primary {shlex.quote(str(esp_end_mib))} {shlex.quote(str(boot_end_mib))} "
             f"mkpart primary {shlex.quote(str(boot_end_mib))} {shlex.quote(str(root_end_mib))} "
+            f"mkpart primary {shlex.quote(str(root_end_mib))} {shlex.quote(str(swap_end_mib))} "
             f"set {shlex.quote(str(esp_number))} boot on "
             f"set {shlex.quote(str(esp_number))} esp on "
-            f"set {shlex.quote(str(boot_number))} bls_boot on "
+            f"set {shlex.quote(str(bls_number))} bls_boot on "
             f"name {shlex.quote(str(esp_number))} {shlex.quote("'EFI System Partition'")} "
             f"name {shlex.quote(str(boot_number))} {shlex.quote("''")} "
-            f"name {shlex.quote(str(root_number))} {shlex.quote("''")}"
+            f"name {shlex.quote(str(root_number))} {shlex.quote("''")} "
+            f"name {shlex.quote(str(swap_number))} {shlex.quote("''")}"
         ),
         dryrun=dryrun,
     )
@@ -264,18 +297,28 @@ def do_add_partitions(
     diskpath: str, disklayout: dict, start_mib: int, dryrun: bool = False
 ):
     boot_number = disklayout["boot"]["number"]
+    bls_number = disklayout["bls"]["number"]
     root_number = disklayout["root"]["number"]
+    swap_number = disklayout["swap"]["number"]
 
     boot_mib = disklayout["boot"]["sizemib"]
     root_mib = disklayout["root"]["sizemib"]
+    swap_mib = disklayout["swap"]["sizemib"]
     boot_end_mib = start_mib + boot_mib
     root_end_mib = boot_end_mib + root_mib
+    swap_end_mib = root_end_mib + swap_mib
 
     logging.info(
         f"boot: number: {boot_number}, size(MiB): {boot_mib}, start(MiB): {start_mib}, end(MiB): {boot_end_mib}"
     )
     logging.info(
+        f"bls: number: {bls_number}"
+    )
+    logging.info(
         f"root: number: {root_number}, size(MiB): {root_mib}, start(MiB): {boot_end_mib}, end(MiB): {root_end_mib}"
+    )
+    logging.info(
+        f"swap: number: {swap_number}, size(MiB): {swap_mib}, start(MiB): {root_end_mib}, end(MiB): {swap_end_mib}"
     )
 
     logging.info(f"Partitioning {diskpath}")
@@ -286,9 +329,11 @@ def do_add_partitions(
             "unit MiB "
             f"mkpart primary {shlex.quote(str(start_mib))} {shlex.quote(str(boot_end_mib))} "
             f"mkpart primary {shlex.quote(str(boot_end_mib))} {shlex.quote(str(root_end_mib))} "
-            f"set {shlex.quote(str(boot_number))} bls_boot on "
+            f"mkpart primary {shlex.quote(str(root_end_mib))} {shlex.quote(str(swap_end_mib))} "
+            f"set {shlex.quote(str(bls_number))} bls_boot on "
             f"name {shlex.quote(str(boot_number))} {shlex.quote("''")} "
-            f"name {shlex.quote(str(root_number))} {shlex.quote("''")}"
+            f"name {shlex.quote(str(root_number))} {shlex.quote("''")} "
+            f"name {shlex.quote(str(swap_number))} {shlex.quote("''")}"
         ),
         dryrun=dryrun,
     )
@@ -414,7 +459,11 @@ def get_start_mib_after_partnumber(
             break
     if p is None:
         logging.error(
-            f"{diskpath}: partition {partnumber} not found or ignored (likely fractional END in parted output)"
+            f"{diskpath}: partition {partnumber} (= bootnumber-1) not found in parted "
+            f"output. Either it does not exist or its end offset is not MiB-aligned "
+            f"(parted reported a fractional MiB boundary). Check that the partition "
+            f"immediately before startpartition={partnumber+1} was created with MiB "
+            f"alignment. Non-MiB-aligned predecessor partitions are not supported."
         )
         sys.exit(1)
 
@@ -547,6 +596,10 @@ def do_mkfs(part: str, parttype: str, dryrun: bool = False) -> str:
             subprocess_run_wrapper(
                 cmd=f"mkfs.btrfs -d single -m dup {shlex.quote(part)}", dryrun=dryrun
             )
+        case "swap":
+            subprocess_run_wrapper(
+                cmd=f"mkswap {shlex.quote(part)}", dryrun=dryrun
+            )
         case _:
             logging.error(f"Unsupported parttype {parttype} - exiting")
             sys.exit(1)
@@ -591,13 +644,13 @@ def do_btrfs_subvols(part: str, subvolumes: list, dryrun: bool = False):
         os.rmdir(mountpoint)
 
 
-def do_write_disk_var_sh(esppart: str, bootpart: str, rootpart: str, bootdev: str):
+def do_write_disk_var_sh(esppart: str, bootpart: str, rootpart: str, swappart: str, bootdev: str):
     disk_var_sh = os.path.join(os.environ["LOGDIR"], "disk_var.sh")
     with open(disk_var_sh, "w") as f:
         f.write(f'ESP_DEVICE="{esppart}"\n')
         f.write(f'BOOT_PARTITION="{bootpart}"\n')
         f.write(f'ROOT_PARTITION="{rootpart}"\n')
-        f.write('SWAPLIST=""\n')
+        f.write(f'SWAPLIST="{swappart}"\n')
         f.write(f'BOOT_DEVICE="{bootdev}"\n')
         f.write(f'PHYSICAL_BOOT_DEVICES="{bootdev}"\n')
 
@@ -609,16 +662,19 @@ def do_write_crypttab(crypt_uuids: list):
             f.write(f"luks-{crypt_uuid} UUID={crypt_uuid} none luks,discard\n")
 
 
-def do_write_fstab(efi_uuid: str, boot_uuid: str, root_uuid: str):
+def do_write_fstab(efi_uuid: str, boot_uuid: str, root_uuid: str, swap_uuid: str):
     fstab = os.path.join(os.environ["LOGDIR"], "fstab")
     with open(fstab, "w") as f:
         f.write(
-            f"UUID={root_uuid} /         btrfs   rw,subvol=os,compress=zstd:1,x-systemd.device-timeout=0,discard=async 0 1\n"
+            f"UUID={root_uuid} /         btrfs   rw,subvol=os,compress=zstd:1,x-systemd.device-timeout=0,discard=async   0 1\n"
         )
         f.write(
-            f"UUID={boot_uuid} /boot    btrfs   rw,subvol=boot,compress=zstd:1,x-systemd.device-timeout=0,discard=async  0 2\n"
+            f"UUID={boot_uuid} /boot     btrfs   rw,subvol=boot,compress=zstd:1,x-systemd.device-timeout=0,discard=async 0 2\n"
         )
-        f.write(f"UUID={efi_uuid} /boot/efi vfat    rw,discard             0 2\n")
+        f.write(f"UUID={efi_uuid}  /boot/efi vfat    rw,discard                                                              0 2\n")
+        f.write(
+            f"UUID={swap_uuid} swap      swap    defaults,discard                                                        0 0\n"
+        )
 
 
 def get_uuid_of_existing_fs(part: str, dryrun: bool = False) -> str:
@@ -643,9 +699,13 @@ def do_setup_storage(
     esp_number = disklayout["esp"]["number"]
     boot_number = disklayout["boot"]["number"]
     root_number = disklayout["root"]["number"]
+    swap_number = disklayout["swap"]["number"]
 
     crypt_root_uuid = do_cryptsetup(
         partition=f"{diskpath}-part{root_number}", cryptpw=cryptpw, dryrun=dryrun
+    )
+    crypt_swap_uuid = do_cryptsetup(
+        partition=f"{diskpath}-part{swap_number}", cryptpw=cryptpw, dryrun=dryrun
     )
 
     if disklayout["esp"]["wipe"]:
@@ -663,6 +723,9 @@ def do_setup_storage(
     root_uuid = do_mkfs(
         part=f"/dev/mapper/luks-{crypt_root_uuid}", parttype="btrfs", dryrun=dryrun
     )
+    swap_uuid = do_mkfs(
+        part=f"/dev/mapper/luks-{crypt_swap_uuid}", parttype="swap", dryrun=dryrun
+    )
 
     do_btrfs_subvols(
         part=f"{diskpath}-part{boot_number}", subvolumes=["boot"], dryrun=dryrun
@@ -675,12 +738,13 @@ def do_setup_storage(
         esppart=f"{diskpath}-part{esp_number}",
         bootpart=f"{diskpath}-part{boot_number}",
         rootpart=f"/dev/mapper/luks-{crypt_root_uuid}",
+        swappart=f"/dev/mapper/luks-{crypt_swap_uuid}",
         bootdev=f"{diskpath}",
     )
 
-    do_write_crypttab(crypt_uuids=[crypt_root_uuid])
+    do_write_crypttab(crypt_uuids=[crypt_root_uuid, crypt_swap_uuid])
 
-    do_write_fstab(efi_uuid=efi_uuid, boot_uuid=boot_uuid, root_uuid=root_uuid)
+    do_write_fstab(efi_uuid=efi_uuid, boot_uuid=boot_uuid, root_uuid=root_uuid, swap_uuid=swap_uuid)
 
 
 def main():
@@ -693,22 +757,54 @@ def main():
         logging.error("Found both Anaconda dir and FAI dir - can only be either or")
         sys.exit(1)
 
+    # --- input (the only part that differs between KS/Agama and FAI) ---
+    # FAI: variables from class/FB.var, written by faibuilder (same values ksbuilder puts into the tokens)
     disklayoutid = os.environ["DISKLAYOUTID"]
     diskpath = os.environ["DISKPATH"]
     startpartition = int(os.environ["STARTPARTITION"])
-    rootsizemib = int(os.environ.get("ROOTSIZEMIB", 0))
+    bootnumber = int(os.environ["BOOTNUMBER"])
+    blsnumber = int(os.environ["BLSNUMBER"])
+    rootnumber = int(os.environ["ROOTNUMBER"])
+    swapnumber = int(os.environ["SWAPNUMBER"])
+    efisizemib = int(os.environ["EFISIZEMIB"])
+    bootsizemib = int(os.environ["BOOTSIZEMIB"])
+    rootsizemib = int(os.environ["ROOTSIZEMIB"])
+    swapsizemib = int(os.environ["SWAPSIZEMIB"])
     cryptpw = os.environ.get("CRYPTPW")
+    # --- end input ---
 
-    btrfsrootlabel = "almalinux"
-    btrfsbootlabel = "almalinuxboot"
+    btrfsrootlabel = "fedora_fedora"
+    btrfsbootlabel = "fedora_fedoraboot"
 
     logging.info(f"disklayoutid: {shlex.quote(str(disklayoutid))}")
     logging.info(f"diskpath: {shlex.quote(str(diskpath))}")
     logging.info(f"startpartition: {int(startpartition)}")
+    logging.info(f"bootnumber: {int(bootnumber)}")
+    logging.info(f"blsnumber: {int(blsnumber)}")
+    logging.info(f"rootnumber: {int(rootnumber)}")
+    logging.info(f"swapnumber: {int(swapnumber)}")
+    logging.info(f"efisizemib: {int(efisizemib)}")
+    logging.info(f"bootsizemib: {int(bootsizemib)}")
     logging.info(f"rootsizemib: {int(rootsizemib)}")
+    logging.info(f"swapsizemib: {int(swapsizemib)}")
     logging.info("cryptpw: hidden")
 
+    efisizemibmin = int(2047)
+    bootsizemibmin = int(2048)
     rootsizemibmin = int(10240)
+    swapsizemibmin = int(2048)
+
+    if efisizemib < efisizemibmin:
+        logging.error(
+            f"efisizemib {efisizemib} < efisizemibmin {efisizemibmin} - exiting"
+        )
+        sys.exit(1)
+
+    if bootsizemib < bootsizemibmin:
+        logging.error(
+            f"bootsizemib {bootsizemib} < bootsizemibmin {bootsizemibmin} - exiting"
+        )
+        sys.exit(1)
 
     if rootsizemib < rootsizemibmin:
         logging.error(
@@ -716,20 +812,26 @@ def main():
         )
         sys.exit(1)
 
+    if swapsizemib < swapsizemibmin:
+        logging.error(
+            f"swapsizemib {swapsizemib} < swapsizemibmin {swapsizemibmin} - exiting"
+        )
+        sys.exit(1)
+
     disklayouts = {
         "singleos": {
-            "esp": {"number": 1, "wipe": True, "sizemib": 2047},
-            "boot": {"number": 2, "wipe": True, "sizemib": 2048},
-            "root": {"number": 3, "wipe": True, "sizemib": rootsizemib},
+            "esp": {"number": 1, "wipe": True, "sizemib": efisizemib},
+            "boot": {"number": int(bootnumber), "wipe": True, "sizemib": bootsizemib},
+            "bls": {"number": int(blsnumber),},
+            "root": {"number": int(rootnumber), "wipe": True, "sizemib": rootsizemib},
+            "swap": {"number": int(swapnumber), "wipe": True, "sizemib": swapsizemib},
         },
         "multios": {
-            "esp": {"number": 1, "wipe": False, "sizemib": 2047},
-            "boot": {"number": int(startpartition), "wipe": True, "sizemib": 2048},
-            "root": {
-                "number": int(startpartition) + 1,
-                "wipe": True,
-                "sizemib": rootsizemib,
-            },
+            "esp": {"number": 1, "wipe": False, "sizemib": efisizemib},
+            "boot": {"number": int(bootnumber), "wipe": True, "sizemib": bootsizemib},
+            "bls": {"number": int(blsnumber),},
+            "root": {"number": int(rootnumber), "wipe": True, "sizemib": rootsizemib},
+            "swap": {"number": int(swapnumber), "wipe": True, "sizemib": swapsizemib},
         },
     }
 
@@ -750,7 +852,7 @@ def main():
     match disklayoutid:
         case "singleos":
             should_partition = check_should_partition(
-                diskpath=diskpath, diskinfo=diskinfo
+                diskpath=diskpath, diskinfo=diskinfo, disklayout=disklayout, dryrun=dryrun
             )
 
             if should_partition:
@@ -770,6 +872,14 @@ def main():
             parts_by_no: dict[int, dict] = {}
 
             diskparts = diskinfo.get("children")
+            if not diskparts:
+                logging.error(
+                    f"{diskpath}: disk has a partition table ('{diskinfo.get('pttype')}') "
+                    f"but no partitions. An empty partition table is not a supported "
+                    f"starting state — either the disk must be completely empty (no partition "
+                    f"table at all) or it must already have at least an ESP in slot 1."
+                )
+                sys.exit(1)
             for p in diskparts:
                 partnumber = p.get("partno") or p.get("partn")
                 if partnumber:
@@ -824,25 +934,26 @@ def main():
                 if n not in range(1, disklayout["boot"]["number"])
             )
             logging.info(f"extras: {extras}")
-            # - if yes: do not partition at all, but check if boot partition number  and root partition number exist, if not: exit with error
+            # - if yes: do not partition at all, but check if boot partition nubmer and root partition number  and swap partition number exist, if not: exit with error
             if extras:
                 if (
                     disklayout["boot"]["number"] not in parts_by_no
                     or disklayout["root"]["number"] not in parts_by_no
+                    or disklayout["swap"]["number"] not in parts_by_no
                 ):
                     logging.error(
                         f"{diskpath}: found extra partitions beyond 1-{disklayout['boot']['number'] - 1} ({extras}) "
-                        f"but required Linux partitions for boot number {disklayout['boot']['number']} and for root number {disklayout['root']['number']} are not both present."
+                        f"but required Linux partitions for\nboot number {disklayout['boot']['number']},\nroot number {disklayout['root']['number']} and\nswap number {disklayout['swap']['number']} are not all 3 present."
                     )
                     sys.exit(1)
                 logging.info(
                     f"{diskpath}: partitions beyond 1-{disklayout['boot']['number'] - 1} already exist ({extras}); will not create new partitions."
                 )
 
-            # - if no:  create boot and root part at beginning of free space which must begin directly after last part before boot and no other parts until the end of disk
+            # - if no:  create boot, root and swap part at beginning of free space which must begin directly after last part before boot and no other parts until the end of disk
             else:
-                required_mib = int(disklayout["boot"]["sizemib"]) + int(
-                    disklayout["root"]["sizemib"]
+                required_mib = int(disklayout["boot"]["sizemib"]) + int(disklayout["root"]["sizemib"]) + int(
+                    disklayout["swap"]["sizemib"]
                 )
                 logging.info(f"required_mib: {required_mib}")
                 start_mib, avail_mib = get_start_mib_after_partnumber(

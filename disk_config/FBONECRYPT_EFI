@@ -4,12 +4,17 @@
 
 # efi version of FBONECRYPT, ensuring that even if hook doesn't do skiptask partition 
 # no disk with important data is erased and partitioning fails
+#
+# the real layout is created by hooks/partition.FBONECRYPT_EFI (same as ksbuilder): 
+# p1 ESP, p2 /boot (btrfs, XBOOTLDR type), p3 LUKS2 root (btrfs), p4 LUKS2 swap
 
 disk_config /dev/disk/by-id/scsi-definitelyNotExistingDisk disklabel:gpt bootable:1 fstabkey:uuid align-at:1M
 
 p=efi /boot/efi  2G       vfat   rw
 p=boot /boot      2G       ext4  rw,discard
 p=system -          40G      -      -
+p=swap -          2G       -      -
 
 disk_config cryptsetup
 luks:"cryptpw" /      /dev/disk/by-id/scsi-definitelyNotExistingDisk-part3 ext4 rw,discard
+luks:"cryptpw" swap   /dev/disk/by-id/scsi-definitelyNotExistingDisk-part4 swap sw,discard
